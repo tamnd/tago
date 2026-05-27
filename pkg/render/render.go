@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -319,10 +320,13 @@ func (r *Renderer) RenderPage(page *content.Page, allPages []*content.Page) erro
 			}
 		case "home":
 			for _, p := range allPages {
-				if p.Kind == "section" && p.Depth == 1 {
+				if p.Kind == "page" && !p.Draft && !p.Date.IsZero() {
 					data.Pages = append(data.Pages, p)
 				}
 			}
+			sort.Slice(data.Pages, func(i, j int) bool {
+				return data.Pages[i].Date.After(data.Pages[j].Date)
+			})
 		}
 	}
 

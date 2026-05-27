@@ -128,6 +128,12 @@ func Build(cfg *Config) (*Stats, error) {
 		deletedSet[f] = true
 	}
 
+	// cachedPageMap: filePath → cached page metadata (for structural diff).
+	cachedPageMap := make(map[string]*content.Page, len(cachedRecords))
+	for _, rec := range cachedRecords {
+		cachedPageMap[rec.FilePath] = recordToPage(rec, cfg)
+	}
+
 	allPages := make(map[string]*content.Page)
 	for _, rec := range cachedRecords {
 		if changedSet[rec.FilePath] || deletedSet[rec.FilePath] {
@@ -218,31 +224,46 @@ func Build(cfg *Config) (*Stats, error) {
 		}
 	}
 
-	// Step 9: If any change, rebuild global indexes
-	if len(changedFiles) > 0 || len(deletedFiles) > 0 {
-		if err := index.BuildSearchJSON(pageSlice, cfg.OutputDir); err != nil {
-			log.Printf("tago: search index error: %v", err)
+	// Step 9: Rebuild global indexes, scoped by what actually changed.
+	//
+	// structuralChange: pages added/deleted or metadata (title/tags/section/kind)
+	//   changed → graph, tree, calendar, 404 all depend on page structure.
+	// contentChange: any file changed (content or metadata) → search + sitemap.
+	contentChange := len(changedFiles) > 0 || len(deletedFiles) > 0
+	structuralChange := len(deletedFiles) > 0 || structurallyChanged(changedPages, cachedPageMap)
+
+	type indexTask struct {
+		name string
+		run  func() error
+	}
+	var tasks []indexTask
+	if contentChange {
+		tasks = append(tasks,
+			indexTask{"search", func() error { return index.BuildSearchJSON(pageSlice, cfg.OutputDir) }},
+			indexTask{"sitemap", func() error { return index.BuildSitemap(pageSlice, cfg.BaseURL, cfg.OutputDir) }},
+			indexTask{"search-page", func() error { return renderer.RenderSearchPage(cfg.OutputDir) }},
+		)
+	}
+	if structuralChange {
+		tasks = append(tasks,
+			indexTask{"graph", func() error { return index.BuildGraphJSON(pageSlice, cfg.OutputDir) }},
+			indexTask{"tree", func() error { return index.BuildTreeJSON(pageSlice, cfg.OutputDir) }},
+			indexTask{"calendar", func() error { return index.BuildCalendarJSON(pageSlice, cfg.OutputDir) }},
+			indexTask{"404", func() error { return renderer.Render404(cfg.OutputDir, pageSlice) }},
+		)
+	}
+	if len(tasks) > 0 {
+		var twg sync.WaitGroup
+		for _, t := range tasks {
+			twg.Add(1)
+			go func(t indexTask) {
+				defer twg.Done()
+				if err := t.run(); err != nil {
+					log.Printf("tago: %s error: %v", t.name, err)
+				}
+			}(t)
 		}
-		if err := index.BuildGraphJSON(pageSlice, cfg.OutputDir); err != nil {
-			log.Printf("tago: graph error: %v", err)
-		}
-		if err := index.BuildTreeJSON(pageSlice, cfg.OutputDir); err != nil {
-			log.Printf("tago: tree error: %v", err)
-		}
-		if err := index.BuildCalendarJSON(pageSlice, cfg.OutputDir); err != nil {
-			log.Printf("tago: calendar error: %v", err)
-		}
-		if err := index.BuildSitemap(pageSlice, cfg.BaseURL, cfg.OutputDir); err != nil {
-			log.Printf("tago: sitemap error: %v", err)
-		}
-		// Render search page
-		if err := renderer.RenderSearchPage(cfg.OutputDir); err != nil {
-			log.Printf("tago: search page error: %v", err)
-		}
-		// Generate 404.html
-		if err := renderer.Render404(cfg.OutputDir, pageSlice); err != nil {
-			log.Printf("tago: 404 render error: %v", err)
-		}
+		twg.Wait()
 	}
 
 	// Step 10: Delete outputs for deleted pages
@@ -432,6 +453,34 @@ func recordToPage(rec *cache.PageRecord, cfg *Config) *content.Page {
 		Summary:       rec.Summary,
 		ContentPlain:  rec.ContentPlain,
 	}
+}
+
+// structurallyChanged reports whether any changed page has different structural
+// metadata (title, tags, section, kind, date) compared to its cached version,
+// or is a brand-new page not previously in the cache.
+// Graph, tree, and calendar only need rebuilding on structural changes.
+func structurallyChanged(changed map[string]*content.Page, cached map[string]*content.Page) bool {
+	for path, p := range changed {
+		prev, existed := cached[path]
+		if !existed {
+			return true // new page
+		}
+		if p.Title != prev.Title || p.Section != prev.Section || p.Kind != prev.Kind {
+			return true
+		}
+		if !p.Date.Equal(prev.Date) {
+			return true
+		}
+		if len(p.Tags) != len(prev.Tags) {
+			return true
+		}
+		for i, t := range p.Tags {
+			if t != prev.Tags[i] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // pageToRecord converts a content.Page to a cache.PageRecord.
