@@ -1,0 +1,3 @@
+title = "Tago Test Site"
+baseURL = "http://localhost:1313/"
+description = "A test site for the tago static site generator"

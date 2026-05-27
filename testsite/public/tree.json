@@ -1,0 +1,26 @@
+[
+  {
+    "id": "/",
+    "title": "Home",
+    "url": "/",
+    "children": [
+      {
+        "id": "/hello/",
+        "title": "Hello World",
+        "url": "/hello/"
+      },
+      {
+        "id": "/practice/",
+        "title": "Practice Problems",
+        "url": "/practice/",
+        "children": [
+          {
+            "id": "/practice/p1/",
+            "title": "Problem 1: Two Sum",
+            "url": "/practice/p1/"
+          }
+        ]
+      }
+    ]
+  }
+]
