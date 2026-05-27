@@ -11,11 +11,15 @@ import (
 	"strings"
 	"time"
 
+	highlighting "github.com/yuin/goldmark-highlighting/v2"
 	meta "github.com/yuin/goldmark-meta"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/renderer/html"
+
+	chromahtml "github.com/alecthomas/chroma/v2/formatters/html"
+	"github.com/alecthomas/chroma/v2/styles"
 )
 
 // Page represents a single content page or section.
@@ -76,6 +80,14 @@ func init() {
 		goldmark.WithExtensions(
 			extension.GFM,
 			meta.Meta,
+			highlighting.NewHighlighting(
+				highlighting.WithStyle("github"),
+				highlighting.WithGuessLanguage(true),
+				highlighting.WithFormatOptions(
+					chromahtml.WithClasses(true),
+					chromahtml.WithLineNumbers(false),
+				),
+			),
 		),
 		goldmark.WithRendererOptions(
 			html.WithUnsafe(),
@@ -429,4 +441,42 @@ func DepthFromPath(contentDir, filePath string) int {
 		parts = parts[:len(parts)-1]
 	}
 	return len(parts)
+}
+
+// WriteChromaCSS writes a combined light+dark syntax-highlight stylesheet.
+// Light rules use the "github" chroma style; dark rules are prefixed with ".dark".
+func WriteChromaCSS(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+
+	formatter := chromahtml.New(chromahtml.WithClasses(true))
+
+	var buf bytes.Buffer
+
+	// Light theme (github)
+	buf.WriteString("/* chroma syntax highlighting — light (github) */\n")
+	if err := formatter.WriteCSS(&buf, styles.Get("github")); err != nil {
+		return fmt.Errorf("light css: %w", err)
+	}
+
+	// Dark theme: prefix every rule with ".dark"
+	buf.WriteString("\n/* chroma syntax highlighting — dark (github-dark) */\n")
+	var darkBuf bytes.Buffer
+	if err := formatter.WriteCSS(&darkBuf, styles.Get("github-dark")); err != nil {
+		return fmt.Errorf("dark css: %w", err)
+	}
+	for _, line := range strings.Split(darkBuf.String(), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, ".chroma") {
+			buf.WriteString(".dark " + line + "\n")
+		} else {
+			buf.WriteString(line + "\n")
+		}
+	}
+
+	return os.WriteFile(path, buf.Bytes(), 0644)
 }

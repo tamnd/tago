@@ -175,6 +175,10 @@ func Build(cfg *Config) (*Stats, error) {
 		log.Printf("tago: asset processing error: %v", err)
 	}
 
+	if err := content.WriteChromaCSS(filepath.Join(cfg.OutputDir, "css", "chroma.css")); err != nil {
+		log.Printf("tago: chroma css: %v", err)
+	}
+
 	site := &render.SiteData{
 		Title:       cfg.SiteTitle,
 		BaseURL:     cfg.BaseURL,
