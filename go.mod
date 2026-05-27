@@ -1,6 +1,6 @@
 module github.com/tamnd/tago
 
-go 1.22
+go 1.23
 
 require (
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
