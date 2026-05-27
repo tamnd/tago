@@ -33,6 +33,10 @@ func BuildSearchJSON(pages []*content.Page, outputDir string) error {
 		if plainText == "" && p.ContentHTML != "" {
 			plainText = normalizeWhitespace(stripHTML(p.ContentHTML))
 		}
+		// Cap at 500 chars to keep the search index under Cloudflare's 25 MiB file limit
+		if len(plainText) > 500 {
+			plainText = plainText[:500]
+		}
 
 		entry := &SearchEntry{
 			Title: p.Title,
