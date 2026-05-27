@@ -112,6 +112,8 @@ func determineSidebarBack(page *content.Page) *content.Page {
 }
 
 // buildSidebarItems recursively converts a page's children into SidebarItems.
+// Only the active path (the branch containing currentURL) is expanded;
+// sibling branches are collapsed to their section link only.
 func buildSidebarItems(root *content.Page, currentURL string) []*SidebarItem {
 	var items []*SidebarItem
 	for _, child := range root.Children {
@@ -135,6 +137,10 @@ func buildSidebarItems(root *content.Page, currentURL string) []*SidebarItem {
 					item.HasActive = true
 					break
 				}
+			}
+			// Collapse sections not on the active path.
+			if !item.HasActive {
+				item.Children = nil
 			}
 		}
 		items = append(items, item)
