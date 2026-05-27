@@ -67,8 +67,12 @@ func Build(cfg *Config) (*Stats, error) {
 	}
 	defer cacheDB.Close()
 
-	// Step 1: Scan all .md files → compute SHA-256 hashes
-	diskHashes, err := scanMarkdownFiles(cfg.ContentDir)
+	// Step 1: Load stat map for mtime pre-filter, then scan .md files.
+	statMap, err := cacheDB.LoadStatMap()
+	if err != nil {
+		statMap = map[string]cache.StatEntry{} // non-fatal: fall back to full hash
+	}
+	diskHashes, err := scanMarkdownFiles(cfg.ContentDir, statMap)
 	if err != nil {
 		return nil, fmt.Errorf("scan content: %w", err)
 	}
@@ -100,6 +104,11 @@ func Build(cfg *Config) (*Stats, error) {
 		page.Kind = content.KindFromPath(cfg.ContentDir, filePath)
 		page.Section = content.SectionFromPath(cfg.ContentDir, filePath)
 		page.Depth = content.DepthFromPath(cfg.ContentDir, filePath)
+		// Capture stat fields so the next build can skip hashing this file.
+		if info, serr := os.Stat(filePath); serr == nil {
+			page.FileSize = info.Size()
+			page.FileMtime = info.ModTime().UnixNano()
+		}
 		changedPages[filePath] = page
 	}
 
@@ -257,30 +266,51 @@ func Build(cfg *Config) (*Stats, error) {
 	return stats, nil
 }
 
+type fileInfo struct {
+	path  string
+	size  int64
+	mtime int64
+}
+
 // scanMarkdownFiles walks contentDir and returns file_path → sha256 hash.
-// Files are hashed in parallel using a worker pool sized to runtime.NumCPU().
-func scanMarkdownFiles(contentDir string) (map[string]string, error) {
-	var paths []string
+// statCache provides (size, mtime, hash) from the previous build; files whose
+// stat fields match are reused without reading the file content.
+// Remaining files are hashed in parallel using a worker pool sized to NumCPU.
+func scanMarkdownFiles(contentDir string, statCache map[string]cache.StatEntry) (map[string]string, error) {
+	var toHash []fileInfo
+	out := make(map[string]string)
+
 	if err := filepath.Walk(contentDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() && strings.HasSuffix(path, ".md") {
-			paths = append(paths, path)
+		if info.IsDir() || !strings.HasSuffix(path, ".md") {
+			return nil
+		}
+		size := info.Size()
+		mtime := info.ModTime().UnixNano()
+		if e, ok := statCache[path]; ok && e.Size == size && e.Mtime == mtime {
+			out[path] = e.Hash // stat hit — skip reading the file
+		} else {
+			toHash = append(toHash, fileInfo{path, size, mtime})
 		}
 		return nil
 	}); err != nil {
 		return nil, err
 	}
 
+	if len(toHash) == 0 {
+		return out, nil
+	}
+
 	type result struct {
-		path string
+		fi   fileInfo
 		hash string
 		err  error
 	}
 
-	jobs := make(chan string, len(paths))
-	results := make(chan result, len(paths))
+	jobs := make(chan fileInfo, len(toHash))
+	results := make(chan result, len(toHash))
 
 	workers := runtime.NumCPU()
 	var wg sync.WaitGroup
@@ -288,29 +318,23 @@ func scanMarkdownFiles(contentDir string) (map[string]string, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for p := range jobs {
-				h, err := content.HashFile(p)
-				results <- result{p, h, err}
+			for fi := range jobs {
+				h, err := content.HashFile(fi.path)
+				results <- result{fi, h, err}
 			}
 		}()
 	}
-
-	for _, p := range paths {
-		jobs <- p
+	for _, fi := range toHash {
+		jobs <- fi
 	}
 	close(jobs)
+	go func() { wg.Wait(); close(results) }()
 
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	out := make(map[string]string, len(paths))
 	for r := range results {
 		if r.err != nil {
 			return nil, r.err
 		}
-		out[r.path] = r.hash
+		out[r.fi.path] = r.hash
 	}
 	return out, nil
 }
@@ -384,6 +408,8 @@ func recordToPage(rec *cache.PageRecord, cfg *Config) *content.Page {
 	return &content.Page{
 		FilePath:      rec.FilePath,
 		FileHash:      rec.FileHash,
+		FileSize:      rec.FileSize,
+		FileMtime:     rec.FileMtime,
 		RelPermalink:  rec.Permalink,
 		OutputPath:    content.OutputPathFromPermalink(cfg.OutputDir, rec.Permalink),
 		Title:         rec.Title,
@@ -413,6 +439,8 @@ func pageToRecord(page *content.Page) *cache.PageRecord {
 	return &cache.PageRecord{
 		FilePath:      page.FilePath,
 		FileHash:      page.FileHash,
+		FileSize:      page.FileSize,
+		FileMtime:     page.FileMtime,
 		Permalink:     page.RelPermalink,
 		Title:         page.Title,
 		LinkTitle:     page.LinkTitle,

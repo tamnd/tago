@@ -34,7 +34,9 @@ CREATE TABLE IF NOT EXISTS page_cache (
     built_at       INT,
     link_title     TEXT,
     kind           TEXT,
-    content_plain  TEXT
+    content_plain  TEXT,
+    file_size      INT DEFAULT 0,
+    file_mtime     INT DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS build_state (
@@ -43,10 +45,19 @@ CREATE TABLE IF NOT EXISTS build_state (
 );
 `
 
+// StatEntry holds the stat-based pre-filter data for a cached file.
+type StatEntry struct {
+	Hash  string
+	Size  int64
+	Mtime int64
+}
+
 // PageRecord is a row from page_cache.
 type PageRecord struct {
 	FilePath      string
 	FileHash      string
+	FileSize      int64
+	FileMtime     int64
 	Permalink     string
 	Title         string
 	LinkTitle     string
@@ -75,6 +86,14 @@ type Cache struct {
 	db *sql.DB
 }
 
+// migrations runs once after schema creation to add columns introduced after
+// the initial schema. Each statement is allowed to fail (column already exists).
+var migrations = []string{
+	`ALTER TABLE page_cache ADD COLUMN file_size  INT DEFAULT 0`,
+	`ALTER TABLE page_cache ADD COLUMN file_mtime INT DEFAULT 0`,
+	`CREATE INDEX IF NOT EXISTS idx_page_cache_stat ON page_cache (file_path, file_size, file_mtime)`,
+}
+
 // Open opens or creates the cache database at the given path.
 func Open(path string) (*Cache, error) {
 	db, err := sql.Open("sqlite", path+"?_journal=WAL&_timeout=5000")
@@ -84,6 +103,9 @@ func Open(path string) (*Cache, error) {
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("init cache schema: %w", err)
+	}
+	for _, m := range migrations {
+		db.Exec(m) // ignore errors — column already exists is expected
 	}
 	return &Cache{db: db}, nil
 }
@@ -107,6 +129,26 @@ func (c *Cache) LoadHashes() (map[string]string, error) {
 			return nil, err
 		}
 		result[path] = hash
+	}
+	return result, rows.Err()
+}
+
+// LoadStatMap returns a map of file_path → StatEntry (hash + size + mtime).
+// Used as a pre-filter to skip SHA-256 when stat fields match the cached values.
+func (c *Cache) LoadStatMap() (map[string]StatEntry, error) {
+	rows, err := c.db.Query(`SELECT file_path, file_hash, file_size, file_mtime FROM page_cache`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[string]StatEntry)
+	for rows.Next() {
+		var path string
+		var e StatEntry
+		if err := rows.Scan(&path, &e.Hash, &e.Size, &e.Mtime); err != nil {
+			return nil, err
+		}
+		result[path] = e
 	}
 	return result, rows.Err()
 }
@@ -189,8 +231,9 @@ func (c *Cache) Save(r *PageRecord) error {
 		INSERT INTO page_cache
 		    (file_path, file_hash, permalink, title, link_title, description,
 		     tags, date, section, lang, depth, word_count, reading_time, summary, params,
-		     weight, no_index, exclude_search, type, draft, kind, built_at, content_plain)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		     weight, no_index, exclude_search, type, draft, kind, built_at, content_plain,
+		     file_size, file_mtime)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(file_path) DO UPDATE SET
 		    file_hash=excluded.file_hash,
 		    permalink=excluded.permalink,
@@ -213,12 +256,15 @@ func (c *Cache) Save(r *PageRecord) error {
 		    draft=excluded.draft,
 		    kind=excluded.kind,
 		    built_at=excluded.built_at,
-		    content_plain=excluded.content_plain
+		    content_plain=excluded.content_plain,
+		    file_size=excluded.file_size,
+		    file_mtime=excluded.file_mtime
 	`,
 		r.FilePath, r.FileHash, r.Permalink, r.Title, r.LinkTitle, r.Description,
 		tagsJSON, dateStr, r.Section, r.Lang,
 		r.Depth, r.WordCount, r.ReadingTime, r.Summary, paramsJSON,
 		r.Weight, noIndex, excludeSearch, r.Type, draft, r.Kind, builtAt, r.ContentPlain,
+		r.FileSize, r.FileMtime,
 	)
 	return err
 }

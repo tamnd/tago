@@ -22,6 +22,8 @@ import (
 type Page struct {
 	FilePath     string
 	FileHash     string
+	FileSize     int64
+	FileMtime    int64
 	RelPermalink string
 	OutputPath   string
 
