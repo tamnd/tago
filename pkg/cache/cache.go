@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 const schema = `
@@ -77,7 +77,7 @@ type Cache struct {
 
 // Open opens or creates the cache database at the given path.
 func Open(path string) (*Cache, error) {
-	db, err := sql.Open("sqlite3", path+"?_journal=WAL&_timeout=5000")
+	db, err := sql.Open("sqlite", path+"?_journal=WAL&_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("open cache db: %w", err)
 	}
