@@ -5,8 +5,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tamnd/tago/pkg/asset"
@@ -108,24 +110,18 @@ func Build(cfg *Config) (*Stats, error) {
 	}
 
 	// Build page set: start with cached unchanged pages
+	changedSet := make(map[string]bool, len(changedFiles))
+	for _, f := range changedFiles {
+		changedSet[f] = true
+	}
+	deletedSet := make(map[string]bool, len(deletedFiles))
+	for _, f := range deletedFiles {
+		deletedSet[f] = true
+	}
+
 	allPages := make(map[string]*content.Page)
 	for _, rec := range cachedRecords {
-		// Skip deleted and changed (will be replaced)
-		isChanged := false
-		for _, cf := range changedFiles {
-			if cf == rec.FilePath {
-				isChanged = true
-				break
-			}
-		}
-		isDeleted := false
-		for _, df := range deletedFiles {
-			if df == rec.FilePath {
-				isDeleted = true
-				break
-			}
-		}
-		if isChanged || isDeleted {
+		if changedSet[rec.FilePath] || deletedSet[rec.FilePath] {
 			continue
 		}
 		page := recordToPage(rec, cfg)
@@ -262,23 +258,61 @@ func Build(cfg *Config) (*Stats, error) {
 }
 
 // scanMarkdownFiles walks contentDir and returns file_path → sha256 hash.
+// Files are hashed in parallel using a worker pool sized to runtime.NumCPU().
 func scanMarkdownFiles(contentDir string) (map[string]string, error) {
-	result := make(map[string]string)
-	err := filepath.Walk(contentDir, func(path string, info os.FileInfo, err error) error {
+	var paths []string
+	if err := filepath.Walk(contentDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		if info.IsDir() || !strings.HasSuffix(path, ".md") {
-			return nil
+		if !info.IsDir() && strings.HasSuffix(path, ".md") {
+			paths = append(paths, path)
 		}
-		hash, err := content.HashFile(path)
-		if err != nil {
-			return err
-		}
-		result[path] = hash
 		return nil
-	})
-	return result, err
+	}); err != nil {
+		return nil, err
+	}
+
+	type result struct {
+		path string
+		hash string
+		err  error
+	}
+
+	jobs := make(chan string, len(paths))
+	results := make(chan result, len(paths))
+
+	workers := runtime.NumCPU()
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for p := range jobs {
+				h, err := content.HashFile(p)
+				results <- result{p, h, err}
+			}
+		}()
+	}
+
+	for _, p := range paths {
+		jobs <- p
+	}
+	close(jobs)
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	out := make(map[string]string, len(paths))
+	for r := range results {
+		if r.err != nil {
+			return nil, r.err
+		}
+		out[r.path] = r.hash
+	}
+	return out, nil
 }
 
 // markAncestors marks all ancestor pages (section indexes) as needing re-render.
