@@ -238,6 +238,12 @@ func Build(cfg *Config) (*Stats, error) {
 		if !shouldRender {
 			continue
 		}
+		// Cached pages (not in changedPages) have no ContentHTML — re-parse from disk before rendering.
+		if page.ContentHTML == "" && page.FilePath != "" {
+			if reparsed, rerr := content.ParseAndRender(page.FilePath); rerr == nil {
+				page.ContentHTML = reparsed.ContentHTML
+			}
+		}
 		if err := renderer.RenderPage(page, pageSlice); err != nil {
 			log.Printf("tago: render error for %s: %v", page.RelPermalink, err)
 			continue
