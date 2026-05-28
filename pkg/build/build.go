@@ -44,7 +44,7 @@ type Stats struct {
 // renderVersion is bumped whenever the markdown renderer changes in a way that
 // alters HTML output (new extensions, link rewriting, etc.). On mismatch,
 // tago clears all cached content_html to force a full re-render.
-const renderVersion = "2"
+const renderVersion = "3"
 
 // Build runs the full incremental build.
 func Build(cfg *Config) (*Stats, error) {

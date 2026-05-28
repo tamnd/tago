@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -73,6 +74,112 @@ func HashFile(path string) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+// tagCodeFences rewrites bare ``` code fences to add a language tag.
+// It detects the language from: (1) the most-recent heading ("## Python Solution"),
+// (2) code content patterns (def/class → python, func/:= → go, etc.).
+// This runs on the raw markdown bytes before goldmark parses, so the language
+// info is available to the chroma highlighter.
+func tagCodeFences(data []byte) []byte {
+	lines := bytes.Split(data, []byte("\n"))
+	out := make([][]byte, 0, len(lines))
+	lastHeading := ""
+	i := 0
+
+	for i < len(lines) {
+		line := lines[i]
+		trimmed := bytes.TrimSpace(line)
+
+		// Track the most recent heading for language context.
+		if len(trimmed) > 0 && trimmed[0] == '#' {
+			lastHeading = strings.ToLower(string(trimmed))
+		}
+
+		// Bare opening fence — no language tag, not inside another fence.
+		if bytes.Equal(trimmed, []byte("```")) {
+			// Read ahead to collect the fence body.
+			body := [][]byte{}
+			j := i + 1
+			for j < len(lines) && !bytes.Equal(bytes.TrimSpace(lines[j]), []byte("```")) {
+				body = append(body, lines[j])
+				j++
+			}
+			lang := fenceLang(lastHeading, body)
+			out = append(out, []byte("```"+lang))
+			out = append(out, body...)
+			if j < len(lines) {
+				out = append(out, lines[j]) // closing ```
+			}
+			i = j + 1
+			continue
+		}
+
+		// Tagged fence (```python, ```go …) — skip its body unchanged.
+		if bytes.HasPrefix(trimmed, []byte("```")) && len(trimmed) > 3 {
+			out = append(out, line)
+			i++
+			for i < len(lines) {
+				out = append(out, lines[i])
+				if bytes.Equal(bytes.TrimSpace(lines[i]), []byte("```")) {
+					i++
+					break
+				}
+				i++
+			}
+			continue
+		}
+
+		out = append(out, line)
+		i++
+	}
+	return bytes.Join(out, []byte("\n"))
+}
+
+var (
+	rePython = regexp.MustCompile(`(?m)^\s*def\s+\w+|^\s*class\s+\w+\s*[:(]|^\s*(?:import|from)\s+\w+`)
+	reGo     = regexp.MustCompile(`(?m)\bfunc\s+\w+|\bpackage\s+\w+|:=\s*`)
+	reJava   = regexp.MustCompile(`(?m)^\s*(?:public|private|protected)\s+(?:static\s+)?\w`)
+	reSQL    = regexp.MustCompile(`(?im)\bSELECT\b|\bFROM\b`)
+	reCPP    = regexp.MustCompile(`(?m)#include\s*<|std::|cout\s*<<`)
+)
+
+// fenceLang picks a language tag from heading text or code content patterns.
+func fenceLang(heading string, bodyLines [][]byte) string {
+	h := heading
+	switch {
+	case strings.Contains(h, "python"):
+		return "python"
+	case strings.Contains(h, "golang") || strings.Contains(h, "go solution") ||
+		strings.Contains(h, "## go") || strings.HasSuffix(h, " go"):
+		return "go"
+	case strings.Contains(h, "java"):
+		return "java"
+	case strings.Contains(h, "sql"):
+		return "sql"
+	case strings.Contains(h, "c++") || strings.Contains(h, "cpp"):
+		return "cpp"
+	case strings.Contains(h, "javascript") || strings.Contains(h, " js "):
+		return "javascript"
+	case strings.Contains(h, "typescript"):
+		return "typescript"
+	case strings.Contains(h, "rust"):
+		return "rust"
+	}
+	code := string(bytes.Join(bodyLines, []byte("\n")))
+	switch {
+	case rePython.MatchString(code):
+		return "python"
+	case reGo.MatchString(code):
+		return "go"
+	case reJava.MatchString(code):
+		return "java"
+	case reSQL.MatchString(code):
+		return "sql"
+	case reCPP.MatchString(code):
+		return "cpp"
+	}
+	return ""
 }
 
 // mdLinkRewriter strips ".md" from local link destinations so that markdown
@@ -156,15 +263,18 @@ func ParseAndRender(filePath string) (*Page, error) {
 		return nil, fmt.Errorf("read %s: %w", filePath, err)
 	}
 
-	// Compute hash
+	// Compute hash from original source (before preprocessing).
 	h := sha256.New()
 	h.Write(data)
 	fileHash := fmt.Sprintf("%x", h.Sum(nil))
 
+	// Pre-process: tag bare code fences with detected language before goldmark parses.
+	rendered := tagCodeFences(data)
+
 	// Render markdown → HTML
 	var buf bytes.Buffer
 	ctx := parser.NewContext()
-	if err := mdRenderer.Convert(data, &buf, parser.WithContext(ctx)); err != nil {
+	if err := mdRenderer.Convert(rendered, &buf, parser.WithContext(ctx)); err != nil {
 		return nil, fmt.Errorf("render %s: %w", filePath, err)
 	}
 	contentHTML := buf.String()
