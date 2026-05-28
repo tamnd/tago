@@ -201,13 +201,18 @@ func Build(cfg *Config) (*Stats, error) {
 		}
 	}
 
-	// Detect pages whose output HTML was rendered with empty ContentHTML (content div is blank).
-	// Re-render only those — avoids a full re-render of all pages when asset fingerprints change.
+	// Detect pages that need re-rendering due to missing/empty ContentHTML:
+	// 1. Output file has an empty content div (page.html renders it, detectable)
+	// 2. Page has plain-text content in DB but no HTML (section pages use {{if .ContentHTML}},
+	//    so no empty div is emitted — check ContentPlain instead)
 	for _, p := range allPages {
-		if !needsRender[p.FilePath] && p.OutputPath != "" {
-			if outputHasEmptyContent(p.OutputPath) {
-				needsRender[p.FilePath] = true
-			}
+		if needsRender[p.FilePath] || p.OutputPath == "" {
+			continue
+		}
+		if outputHasEmptyContent(p.OutputPath) {
+			needsRender[p.FilePath] = true
+		} else if p.ContentPlain != "" && p.ContentHTML == "" {
+			needsRender[p.FilePath] = true
 		}
 	}
 
