@@ -238,6 +238,13 @@ func Build(cfg *Config) (*Stats, error) {
 		if !shouldRender {
 			continue
 		}
+		// If ContentHTML is missing (DB rows before content_html column was added),
+		// re-parse from disk so the render produces real output and the DB gets populated.
+		if page.ContentHTML == "" && page.FilePath != "" {
+			if reparsed, rerr := content.ParseAndRender(page.FilePath); rerr == nil {
+				page.ContentHTML = reparsed.ContentHTML
+			}
+		}
 		if err := renderer.RenderPage(page, pageSlice); err != nil {
 			log.Printf("tago: render error for %s: %v", page.RelPermalink, err)
 			continue
