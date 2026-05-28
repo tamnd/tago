@@ -471,7 +471,7 @@ func WriteChromaCSS(path string) error {
 		if line == "" {
 			continue
 		}
-		if strings.HasPrefix(line, ".chroma") {
+		if strings.HasPrefix(line, ".") {
 			buf.WriteString(".dark " + line + "\n")
 		} else {
 			buf.WriteString(line + "\n")
