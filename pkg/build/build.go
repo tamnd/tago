@@ -1,6 +1,7 @@
 package build
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"os"
@@ -200,15 +201,14 @@ func Build(cfg *Config) (*Stats, error) {
 		}
 	}
 
-	// If any asset URL changed since last build, all pages must re-render (new fingerprint in <link>/<script>)
-	assetSig := strings.Join([]string{assetRefs.CSS, assetRefs.JS, assetRefs.JSHead, chromaCSSURL}, "|")
-	prevAssetSig, _ := cacheDB.GetState("asset_sig_v2")
-	if assetSig != prevAssetSig {
-		log.Printf("tago: asset fingerprints changed — forcing full re-render")
-		for _, p := range allPages {
-			needsRender[p.FilePath] = true
+	// Detect pages whose output HTML was rendered with empty ContentHTML (content div is blank).
+	// Re-render only those — avoids a full re-render of all pages when asset fingerprints change.
+	for _, p := range allPages {
+		if !needsRender[p.FilePath] && p.OutputPath != "" {
+			if outputHasEmptyContent(p.OutputPath) {
+				needsRender[p.FilePath] = true
+			}
 		}
-		_ = cacheDB.SetState("asset_sig_v2", assetSig)
 	}
 
 	site := &render.SiteData{
@@ -557,4 +557,14 @@ func pageToRecord(page *content.Page) *cache.PageRecord {
 		ContentPlain:  page.ContentPlain,
 		ContentHTML:   page.ContentHTML,
 	}
+}
+
+// outputHasEmptyContent reports whether an output HTML file was rendered with
+// blank ContentHTML — detectable by the empty content div pattern.
+func outputHasEmptyContent(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return bytes.Contains(data, []byte(`class="content"></div>`))
 }
