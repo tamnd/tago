@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS page_cache (
     link_title     TEXT,
     kind           TEXT,
     content_plain  TEXT,
+    content_html   TEXT,
     file_size      INT DEFAULT 0,
     file_mtime     INT DEFAULT 0
 );
@@ -71,6 +72,7 @@ type PageRecord struct {
 	ReadingTime   int
 	Summary       string
 	ContentPlain  string // plain text for search (stripped HTML)
+	ContentHTML   string // rendered HTML body
 	Params        map[string]any
 	Weight        int
 	NoIndex       bool
@@ -89,8 +91,9 @@ type Cache struct {
 // migrations runs once after schema creation to add columns introduced after
 // the initial schema. Each statement is allowed to fail (column already exists).
 var migrations = []string{
-	`ALTER TABLE page_cache ADD COLUMN file_size  INT DEFAULT 0`,
-	`ALTER TABLE page_cache ADD COLUMN file_mtime INT DEFAULT 0`,
+	`ALTER TABLE page_cache ADD COLUMN file_size    INT DEFAULT 0`,
+	`ALTER TABLE page_cache ADD COLUMN file_mtime   INT DEFAULT 0`,
+	`ALTER TABLE page_cache ADD COLUMN content_html TEXT`,
 	`CREATE INDEX IF NOT EXISTS idx_page_cache_stat ON page_cache (file_path, file_size, file_mtime)`,
 }
 
@@ -159,7 +162,8 @@ func (c *Cache) LoadAll() ([]*PageRecord, error) {
 		SELECT file_path, file_hash, permalink, title, link_title, description,
 		       tags, date, section, lang, depth, word_count, summary, params,
 		       weight, no_index, exclude_search, type, draft, kind, built_at,
-		       COALESCE(content_plain, ''), COALESCE(reading_time, 0)
+		       COALESCE(content_plain, ''), COALESCE(reading_time, 0),
+		       COALESCE(content_html, '')
 		FROM page_cache
 	`)
 	if err != nil {
@@ -177,7 +181,7 @@ func (c *Cache) LoadAll() ([]*PageRecord, error) {
 			&r.Description, &tagsJSON, &dateStr, &r.Section, &r.Lang,
 			&r.Depth, &r.WordCount, &r.Summary, &paramsJSON,
 			&r.Weight, &noIndex, &excludeSearch, &r.Type, &draft, &r.Kind, &r.BuiltAt,
-			&r.ContentPlain, &r.ReadingTime,
+			&r.ContentPlain, &r.ReadingTime, &r.ContentHTML,
 		)
 		if err != nil {
 			return nil, err
@@ -232,8 +236,8 @@ func (c *Cache) Save(r *PageRecord) error {
 		    (file_path, file_hash, permalink, title, link_title, description,
 		     tags, date, section, lang, depth, word_count, reading_time, summary, params,
 		     weight, no_index, exclude_search, type, draft, kind, built_at, content_plain,
-		     file_size, file_mtime)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		     content_html, file_size, file_mtime)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(file_path) DO UPDATE SET
 		    file_hash=excluded.file_hash,
 		    permalink=excluded.permalink,
@@ -257,6 +261,7 @@ func (c *Cache) Save(r *PageRecord) error {
 		    kind=excluded.kind,
 		    built_at=excluded.built_at,
 		    content_plain=excluded.content_plain,
+		    content_html=excluded.content_html,
 		    file_size=excluded.file_size,
 		    file_mtime=excluded.file_mtime
 	`,
@@ -264,7 +269,7 @@ func (c *Cache) Save(r *PageRecord) error {
 		tagsJSON, dateStr, r.Section, r.Lang,
 		r.Depth, r.WordCount, r.ReadingTime, r.Summary, paramsJSON,
 		r.Weight, noIndex, excludeSearch, r.Type, draft, r.Kind, builtAt, r.ContentPlain,
-		r.FileSize, r.FileMtime,
+		r.ContentHTML, r.FileSize, r.FileMtime,
 	)
 	return err
 }

@@ -202,13 +202,13 @@ func Build(cfg *Config) (*Stats, error) {
 
 	// If any asset URL changed since last build, all pages must re-render (new fingerprint in <link>/<script>)
 	assetSig := strings.Join([]string{assetRefs.CSS, assetRefs.JS, assetRefs.JSHead, chromaCSSURL}, "|")
-	prevAssetSig, _ := cacheDB.GetState("asset_sig")
+	prevAssetSig, _ := cacheDB.GetState("asset_sig_v2")
 	if assetSig != prevAssetSig {
 		log.Printf("tago: asset fingerprints changed — forcing full re-render")
 		for _, p := range allPages {
 			needsRender[p.FilePath] = true
 		}
-		_ = cacheDB.SetState("asset_sig", assetSig)
+		_ = cacheDB.SetState("asset_sig_v2", assetSig)
 	}
 
 	site := &render.SiteData{
@@ -237,12 +237,6 @@ func Build(cfg *Config) (*Stats, error) {
 		shouldRender := needsRender[page.FilePath] || (page.FilePath == "" /* special pages */)
 		if !shouldRender {
 			continue
-		}
-		// Cached pages (not in changedPages) have no ContentHTML — re-parse from disk before rendering.
-		if page.ContentHTML == "" && page.FilePath != "" {
-			if reparsed, rerr := content.ParseAndRender(page.FilePath); rerr == nil {
-				page.ContentHTML = reparsed.ContentHTML
-			}
 		}
 		if err := renderer.RenderPage(page, pageSlice); err != nil {
 			log.Printf("tago: render error for %s: %v", page.RelPermalink, err)
@@ -495,6 +489,7 @@ func recordToPage(rec *cache.PageRecord, cfg *Config) *content.Page {
 		ReadingTime:   rec.ReadingTime,
 		Summary:       rec.Summary,
 		ContentPlain:  rec.ContentPlain,
+		ContentHTML:   rec.ContentHTML,
 	}
 }
 
@@ -553,5 +548,6 @@ func pageToRecord(page *content.Page) *cache.PageRecord {
 		ReadingTime:   page.ReadingTime,
 		Summary:       page.Summary,
 		ContentPlain:  page.ContentPlain,
+		ContentHTML:   page.ContentHTML,
 	}
 }
