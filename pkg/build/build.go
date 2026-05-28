@@ -185,21 +185,12 @@ func Build(cfg *Config) (*Stats, error) {
 		log.Printf("tago: asset processing error: %v", err)
 	}
 
-	chromaHash, err := content.WriteChromaCSS(filepath.Join(cfg.OutputDir, "css", "chroma.css"))
-	if err != nil {
+	// chroma.css is regenerated every build — use a fixed URL so all pages always
+	// get the current version without needing to re-render for a fingerprint change.
+	if _, err := content.WriteChromaCSS(filepath.Join(cfg.OutputDir, "css", "chroma.css")); err != nil {
 		log.Printf("tago: chroma css: %v", err)
 	}
-	// Fingerprint: copy chroma.css → chroma.<hash8>.css and record URL
 	chromaCSSURL := "/css/chroma.css"
-	if chromaHash != "" {
-		fingerprinted := filepath.Join(cfg.OutputDir, "css", "chroma."+chromaHash[:8]+".css")
-		src := filepath.Join(cfg.OutputDir, "css", "chroma.css")
-		if data, rerr := os.ReadFile(src); rerr == nil {
-			if werr := os.WriteFile(fingerprinted, data, 0644); werr == nil {
-				chromaCSSURL = "/css/chroma." + chromaHash[:8] + ".css"
-			}
-		}
-	}
 
 	// Detect pages that need re-rendering due to missing/empty ContentHTML:
 	// 1. Output file has an empty content div (page.html renders it, detectable)
