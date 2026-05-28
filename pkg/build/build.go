@@ -184,8 +184,31 @@ func Build(cfg *Config) (*Stats, error) {
 		log.Printf("tago: asset processing error: %v", err)
 	}
 
-	if err := content.WriteChromaCSS(filepath.Join(cfg.OutputDir, "css", "chroma.css")); err != nil {
+	chromaHash, err := content.WriteChromaCSS(filepath.Join(cfg.OutputDir, "css", "chroma.css"))
+	if err != nil {
 		log.Printf("tago: chroma css: %v", err)
+	}
+	// Fingerprint: copy chroma.css → chroma.<hash8>.css and record URL
+	chromaCSSURL := "/css/chroma.css"
+	if chromaHash != "" {
+		fingerprinted := filepath.Join(cfg.OutputDir, "css", "chroma."+chromaHash[:8]+".css")
+		src := filepath.Join(cfg.OutputDir, "css", "chroma.css")
+		if data, rerr := os.ReadFile(src); rerr == nil {
+			if werr := os.WriteFile(fingerprinted, data, 0644); werr == nil {
+				chromaCSSURL = "/css/chroma." + chromaHash[:8] + ".css"
+			}
+		}
+	}
+
+	// If any asset URL changed since last build, all pages must re-render (new fingerprint in <link>/<script>)
+	assetSig := strings.Join([]string{assetRefs.CSS, assetRefs.JS, assetRefs.JSHead, chromaCSSURL}, "|")
+	prevAssetSig, _ := cacheDB.GetState("asset_sig")
+	if assetSig != prevAssetSig {
+		log.Printf("tago: asset fingerprints changed — forcing full re-render")
+		for _, p := range allPages {
+			needsRender[p.FilePath] = true
+		}
+		_ = cacheDB.SetState("asset_sig", assetSig)
 	}
 
 	site := &render.SiteData{
@@ -201,6 +224,7 @@ func Build(cfg *Config) (*Stats, error) {
 		JS:         assetRefs.JS,
 		FlexSearch: assetRefs.FlexSearch,
 		KaTeX:      assetRefs.KaTeX,
+		ChromaCSS:  chromaCSSURL,
 		Extra:      assetRefs.Extra,
 	}
 

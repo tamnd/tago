@@ -30,6 +30,7 @@ type AssetRefs struct {
 	JS         string
 	FlexSearch string
 	KaTeX      string
+	ChromaCSS  string
 	Extra      map[string]string // original basename → fingerprinted URL
 }
 

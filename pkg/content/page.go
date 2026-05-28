@@ -445,9 +445,10 @@ func DepthFromPath(contentDir, filePath string) int {
 
 // WriteChromaCSS writes a combined light+dark syntax-highlight stylesheet.
 // Light rules use the "github" chroma style; dark rules are prefixed with ".dark".
-func WriteChromaCSS(path string) error {
+// Returns the SHA-256 hex hash of the written file (for fingerprinting).
+func WriteChromaCSS(path string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
+		return "", err
 	}
 
 	formatter := chromahtml.New(chromahtml.WithClasses(true))
@@ -457,14 +458,14 @@ func WriteChromaCSS(path string) error {
 	// Light theme (github)
 	buf.WriteString("/* chroma syntax highlighting — light (github) */\n")
 	if err := formatter.WriteCSS(&buf, styles.Get("github")); err != nil {
-		return fmt.Errorf("light css: %w", err)
+		return "", fmt.Errorf("light css: %w", err)
 	}
 
-	// Dark theme: prefix every rule with ".dark"
+	// Dark theme: prefix every CSS rule with ".dark" so it only applies in dark mode
 	buf.WriteString("\n/* chroma syntax highlighting — dark (github-dark) */\n")
 	var darkBuf bytes.Buffer
 	if err := formatter.WriteCSS(&darkBuf, styles.Get("github-dark")); err != nil {
-		return fmt.Errorf("dark css: %w", err)
+		return "", fmt.Errorf("dark css: %w", err)
 	}
 	for _, line := range strings.Split(darkBuf.String(), "\n") {
 		line = strings.TrimSpace(line)
@@ -478,5 +479,13 @@ func WriteChromaCSS(path string) error {
 		}
 	}
 
-	return os.WriteFile(path, buf.Bytes(), 0644)
+	data := buf.Bytes()
+	h := sha256.New()
+	h.Write(data)
+	hash := fmt.Sprintf("%x", h.Sum(nil))
+
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return "", err
+	}
+	return hash, nil
 }
