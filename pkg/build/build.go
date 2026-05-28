@@ -169,6 +169,15 @@ func Build(cfg *Config) (*Stats, error) {
 		}
 	}
 
+	// If output file is missing (e.g. empty public/ after cache miss), force re-render
+	for _, p := range allPages {
+		if !needsRender[p.FilePath] && p.OutputPath != "" {
+			if _, err := os.Stat(p.OutputPath); os.IsNotExist(err) {
+				needsRender[p.FilePath] = true
+			}
+		}
+	}
+
 	// Step 7 & 8: Render pages
 	assetRefs, err := asset.ProcessAssets(cfg.StaticDir, cfg.OutputDir)
 	if err != nil {
