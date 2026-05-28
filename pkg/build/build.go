@@ -21,17 +21,18 @@ import (
 
 // Config holds the build configuration.
 type Config struct {
-	ContentDir  string
-	OutputDir   string
-	StaticDir   string
-	LayoutsDir  string
-	BaseURL     string
-	DefaultLang string
-	SiteTitle   string
-	SiteDesc    string
-	EditURLBase string
-	Clean       bool
-	LiveReload  bool
+	ContentDir     string
+	OutputDir      string
+	StaticDir      string
+	ThemeStaticDir string // optional: themes/<name>/static (overrides StaticDir for CSS/JS refs)
+	LayoutsDir     string
+	BaseURL        string
+	DefaultLang    string
+	SiteTitle      string
+	SiteDesc       string
+	EditURLBase    string
+	Clean          bool
+	LiveReload     bool
 }
 
 // Stats holds build statistics.
@@ -44,7 +45,7 @@ type Stats struct {
 // renderVersion is bumped whenever the markdown renderer changes in a way that
 // alters HTML output (new extensions, link rewriting, etc.). On mismatch,
 // tago clears all cached content_html to force a full re-render.
-const renderVersion = "3"
+const renderVersion = "4"
 
 // Build runs the full incremental build.
 func Build(cfg *Config) (*Stats, error) {
@@ -199,6 +200,33 @@ func Build(cfg *Config) (*Stats, error) {
 	assetRefs, err := asset.ProcessAssets(cfg.StaticDir, cfg.OutputDir)
 	if err != nil {
 		log.Printf("tago: asset processing error: %v", err)
+	}
+	// Theme static assets override site static refs (CSS, JS).  Both directories
+	// are copied to public/; theme files land on top.
+	if cfg.ThemeStaticDir != "" {
+		themeRefs, terr := asset.ProcessAssets(cfg.ThemeStaticDir, cfg.OutputDir)
+		if terr != nil {
+			log.Printf("tago: theme asset processing error: %v", terr)
+		} else {
+			if themeRefs.CSS != "" {
+				assetRefs.CSS = themeRefs.CSS
+			}
+			if themeRefs.JS != "" {
+				assetRefs.JS = themeRefs.JS
+			}
+			if themeRefs.JSHead != "" {
+				assetRefs.JSHead = themeRefs.JSHead
+			}
+			if themeRefs.FlexSearch != "" {
+				assetRefs.FlexSearch = themeRefs.FlexSearch
+			}
+			for k, v := range themeRefs.Extra {
+				if assetRefs.Extra == nil {
+					assetRefs.Extra = make(map[string]string)
+				}
+				assetRefs.Extra[k] = v
+			}
+		}
 	}
 
 	// chroma.css is regenerated every build — use a fixed URL so all pages always

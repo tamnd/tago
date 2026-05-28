@@ -67,15 +67,17 @@ Serve flags:
 }
 
 type flags struct {
-	content string
-	output  string
-	static  string
-	layouts string
-	baseURL string
-	title   string
-	desc    string
-	clean   bool
-	port    int
+	content     string
+	output      string
+	static      string
+	layouts     string
+	theme       string // optional theme name → themes/<name>/layouts + themes/<name>/static
+	themeStatic string // derived from theme
+	baseURL     string
+	title       string
+	desc        string
+	clean       bool
+	port        int
 }
 
 func parseFlags(args []string) *flags {
@@ -127,6 +129,11 @@ func parseFlags(args []string) *flags {
 			if i < len(args) {
 				f.desc = args[i]
 			}
+		case "--theme":
+			i++
+			if i < len(args) {
+				f.theme = args[i]
+			}
 		case "--clean":
 			f.clean = true
 		case "--port":
@@ -140,6 +147,14 @@ func parseFlags(args []string) *flags {
 
 	// Try to load tago.toml from cwd
 	loadTOML(f)
+
+	// Derive theme paths after TOML load
+	if f.theme != "" && f.layouts == "layouts" {
+		f.layouts = filepath.Join("themes", f.theme, "layouts")
+	}
+	if f.theme != "" && f.themeStatic == "" {
+		f.themeStatic = filepath.Join("themes", f.theme, "static")
+	}
 
 	// Make paths absolute
 	if !filepath.IsAbs(f.content) {
@@ -160,6 +175,11 @@ func parseFlags(args []string) *flags {
 	if !filepath.IsAbs(f.layouts) {
 		if abs, err := filepath.Abs(f.layouts); err == nil {
 			f.layouts = abs
+		}
+	}
+	if f.themeStatic != "" && !filepath.IsAbs(f.themeStatic) {
+		if abs, err := filepath.Abs(f.themeStatic); err == nil {
+			f.themeStatic = abs
 		}
 	}
 
@@ -203,6 +223,10 @@ func loadTOML(f *flags) {
 		case "staticDir":
 			if f.static == "static" {
 				f.static = val
+			}
+		case "theme":
+			if f.theme == "" {
+				f.theme = val
 			}
 		}
 	}
@@ -270,16 +294,17 @@ func runBuild(args []string) {
 	f := parseFlags(args)
 
 	cfg := &build.Config{
-		ContentDir:  f.content,
-		OutputDir:   f.output,
-		StaticDir:   f.static,
-		LayoutsDir:  f.layouts,
-		BaseURL:     f.baseURL,
-		DefaultLang: "en",
-		SiteTitle:   f.title,
-		SiteDesc:    f.desc,
-		Clean:       f.clean,
-		LiveReload:  false,
+		ContentDir:     f.content,
+		OutputDir:      f.output,
+		StaticDir:      f.static,
+		ThemeStaticDir: f.themeStatic,
+		LayoutsDir:     f.layouts,
+		BaseURL:        f.baseURL,
+		DefaultLang:    "en",
+		SiteTitle:      f.title,
+		SiteDesc:       f.desc,
+		Clean:          f.clean,
+		LiveReload:     false,
 	}
 
 	stats, err := build.Build(cfg)
@@ -295,16 +320,17 @@ func runServe(args []string) {
 	f := parseFlags(args)
 
 	cfg := &build.Config{
-		ContentDir:  f.content,
-		OutputDir:   f.output,
-		StaticDir:   f.static,
-		LayoutsDir:  f.layouts,
-		BaseURL:     fmt.Sprintf("http://localhost:%d/", f.port),
-		DefaultLang: "en",
-		SiteTitle:   f.title,
-		SiteDesc:    f.desc,
-		Clean:       f.clean,
-		LiveReload:  true,
+		ContentDir:     f.content,
+		OutputDir:      f.output,
+		StaticDir:      f.static,
+		ThemeStaticDir: f.themeStatic,
+		LayoutsDir:     f.layouts,
+		BaseURL:        fmt.Sprintf("http://localhost:%d/", f.port),
+		DefaultLang:    "en",
+		SiteTitle:      f.title,
+		SiteDesc:       f.desc,
+		Clean:          f.clean,
+		LiveReload:     true,
 	}
 
 	// Initial build
