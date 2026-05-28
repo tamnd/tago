@@ -41,6 +41,11 @@ type Stats struct {
 	Duration     time.Duration
 }
 
+// renderVersion is bumped whenever the markdown renderer changes in a way that
+// alters HTML output (new extensions, link rewriting, etc.). On mismatch,
+// tago clears all cached content_html to force a full re-render.
+const renderVersion = "2"
+
 // Build runs the full incremental build.
 func Build(cfg *Config) (*Stats, error) {
 	start := time.Now()
@@ -67,6 +72,17 @@ func Build(cfg *Config) (*Stats, error) {
 		return nil, fmt.Errorf("open cache: %w", err)
 	}
 	defer cacheDB.Close()
+
+	// If the renderer changed (new extensions, link rewriting, etc.), clear all
+	// cached content_html so every page gets re-rendered with the current renderer.
+	if storedVer, _ := cacheDB.GetState("render_version"); storedVer != renderVersion {
+		log.Printf("tago: render_version changed (%q → %q), clearing content_html cache",
+			storedVer, renderVersion)
+		if err := cacheDB.ClearContentHTML(); err != nil {
+			log.Printf("tago: warn: clear content_html: %v", err)
+		}
+		_ = cacheDB.SetState("render_version", renderVersion)
+	}
 
 	// Step 1: Load stat map for mtime pre-filter, then scan .md files.
 	statMap, err := cacheDB.LoadStatMap()

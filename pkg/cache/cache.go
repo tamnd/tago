@@ -274,6 +274,13 @@ func (c *Cache) Save(r *PageRecord) error {
 	return err
 }
 
+// ClearContentHTML sets content_html to NULL for all rows, forcing re-render
+// on the next build (used when the renderer version changes).
+func (c *Cache) ClearContentHTML() error {
+	_, err := c.db.Exec(`UPDATE page_cache SET content_html = NULL`)
+	return err
+}
+
 // Delete removes a page record from the cache.
 func (c *Cache) Delete(filePath string) error {
 	_, err := c.db.Exec(`DELETE FROM page_cache WHERE file_path = ?`, filePath)
