@@ -45,7 +45,7 @@ type Stats struct {
 // renderVersion is bumped whenever the markdown renderer changes in a way that
 // alters HTML output (new extensions, link rewriting, etc.). On mismatch,
 // tago clears all cached content_html to force a full re-render.
-const renderVersion = "4"
+const renderVersion = "5"
 
 // Build runs the full incremental build.
 func Build(cfg *Config) (*Stats, error) {
@@ -74,15 +74,17 @@ func Build(cfg *Config) (*Stats, error) {
 	}
 	defer cacheDB.Close()
 
-	// If the renderer changed (new extensions, link rewriting, etc.), clear all
-	// cached content_html so every page gets re-rendered with the current renderer.
+	// If the renderer or theme changed, clear all cached content_html AND force
+	// every page to re-render (including section/home pages with no body text).
+	layoutChanged := false
 	if storedVer, _ := cacheDB.GetState("render_version"); storedVer != renderVersion {
-		log.Printf("tago: render_version changed (%q → %q), clearing content_html cache",
+		log.Printf("tago: render_version changed (%q → %q), forcing full re-render",
 			storedVer, renderVersion)
 		if err := cacheDB.ClearContentHTML(); err != nil {
 			log.Printf("tago: warn: clear content_html: %v", err)
 		}
 		_ = cacheDB.SetState("render_version", renderVersion)
+		layoutChanged = true
 	}
 
 	// Step 1: Load stat map for mtime pre-filter, then scan .md files.
@@ -187,12 +189,21 @@ func Build(cfg *Config) (*Stats, error) {
 		}
 	}
 
-	// If output file is missing (e.g. empty public/ after cache miss), force re-render
+	// If output file is missing (e.g. empty public/ after cache miss), force re-render.
+	// Also force re-render of ALL pages when the layout/render version changed — this
+	// catches section and home pages that have no body text and therefore skip the
+	// content_html-based check below.
 	for _, p := range allPages {
-		if !needsRender[p.FilePath] && p.OutputPath != "" {
-			if _, err := os.Stat(p.OutputPath); os.IsNotExist(err) {
-				needsRender[p.FilePath] = true
-			}
+		if needsRender[p.FilePath] {
+			continue
+		}
+		if p.OutputPath == "" {
+			continue
+		}
+		if layoutChanged {
+			needsRender[p.FilePath] = true
+		} else if _, err := os.Stat(p.OutputPath); os.IsNotExist(err) {
+			needsRender[p.FilePath] = true
 		}
 	}
 
