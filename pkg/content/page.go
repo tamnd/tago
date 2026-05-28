@@ -461,10 +461,13 @@ func WriteChromaCSS(path string) (string, error) {
 		return "", fmt.Errorf("light css: %w", err)
 	}
 
-	// Dark theme: prefix every CSS rule with ".dark" so it only applies in dark mode
-	buf.WriteString("\n/* chroma syntax highlighting — dark (github-dark) */\n")
+	// Dark theme (dracula): prefix every CSS rule with ".dark ".
+	// Chroma emits lines like: "/* Keyword */ .chroma .k { color: #... }"
+	// We must strip the "/* ... */" comment before checking for the selector,
+	// otherwise HasPrefix(".") never matches and dark rules leak into light mode.
+	buf.WriteString("\n/* chroma syntax highlighting — dark (dracula) */\n")
 	var darkBuf bytes.Buffer
-	if err := formatter.WriteCSS(&darkBuf, styles.Get("github-dark")); err != nil {
+	if err := formatter.WriteCSS(&darkBuf, styles.Get("dracula")); err != nil {
 		return "", fmt.Errorf("dark css: %w", err)
 	}
 	for _, line := range strings.Split(darkBuf.String(), "\n") {
@@ -472,11 +475,14 @@ func WriteChromaCSS(path string) (string, error) {
 		if line == "" {
 			continue
 		}
-		if strings.HasPrefix(line, ".") {
-			buf.WriteString(".dark " + line + "\n")
-		} else {
-			buf.WriteString(line + "\n")
+		// Strip block comment prefix ("/* ... */ ") to reach the CSS selector.
+		if idx := strings.Index(line, "*/"); idx >= 0 {
+			line = strings.TrimSpace(line[idx+2:])
 		}
+		if line == "" {
+			continue
+		}
+		buf.WriteString(".dark " + line + "\n")
 	}
 
 	data := buf.Bytes()
