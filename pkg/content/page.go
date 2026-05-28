@@ -302,7 +302,7 @@ func ParseAndRender(filePath string) (*Page, error) {
 		page.LinkTitle = page.Title
 	}
 	if v, ok := fm["description"]; ok {
-		page.Description = toString(v)
+		page.Description = smartTruncate(toString(v), 280)
 	}
 	if v, ok := fm["date"]; ok {
 		page.Date = parseDate(toString(v))
@@ -432,6 +432,28 @@ func OutputPathFromPermalink(outputDir, permalink string) string {
 		return filepath.Join(outputDir, "index.html")
 	}
 	return filepath.Join(outputDir, filepath.FromSlash(clean), "index.html")
+}
+
+// smartTruncate cuts text at a sentence boundary (. ! ?) within maxChars.
+// Falls back to word boundary + ellipsis when no sentence end is found.
+func smartTruncate(text string, maxChars int) string {
+	if len(text) <= maxChars {
+		return text
+	}
+	window := text[:maxChars]
+	last := -1
+	for _, ch := range []byte{'.', '!', '?'} {
+		if idx := strings.LastIndexByte(window, ch); idx > last {
+			last = idx
+		}
+	}
+	if last >= maxChars*2/5 { // at least 40% in
+		return strings.TrimSpace(text[:last+1])
+	}
+	if cut := strings.LastIndex(window, " "); cut > 0 {
+		return strings.TrimRight(window[:cut], ",:;") + "…"
+	}
+	return window + "…"
 }
 
 // --- helper conversion functions ---
