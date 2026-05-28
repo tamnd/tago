@@ -2,6 +2,7 @@ package build
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"log"
 	"os"
@@ -45,7 +46,7 @@ type Stats struct {
 // renderVersion is bumped whenever the markdown renderer changes in a way that
 // alters HTML output (new extensions, link rewriting, etc.). On mismatch,
 // tago clears all cached content_html to force a full re-render.
-const renderVersion = "5"
+const renderVersion = "6"
 
 // Build runs the full incremental build.
 func Build(cfg *Config) (*Stats, error) {
@@ -74,9 +75,10 @@ func Build(cfg *Config) (*Stats, error) {
 	}
 	defer cacheDB.Close()
 
-	// If the renderer or theme changed, clear all cached content_html AND force
-	// every page to re-render (including section/home pages with no body text).
+	// Detect renderer version change OR layout file changes — both force a full re-render
+	// of every page (including section/home pages that have no body text).
 	layoutChanged := false
+
 	if storedVer, _ := cacheDB.GetState("render_version"); storedVer != renderVersion {
 		log.Printf("tago: render_version changed (%q → %q), forcing full re-render",
 			storedVer, renderVersion)
@@ -84,6 +86,17 @@ func Build(cfg *Config) (*Stats, error) {
 			log.Printf("tago: warn: clear content_html: %v", err)
 		}
 		_ = cacheDB.SetState("render_version", renderVersion)
+		layoutChanged = true
+	}
+
+	// Hash layout + theme-static dirs so template edits auto-trigger a full re-render
+	// without needing a manual renderVersion bump.
+	layoutsHash := hashDirMeta(cfg.LayoutsDir) + "|" + hashDirMeta(cfg.ThemeStaticDir)
+	if storedHash, _ := cacheDB.GetState("layouts_hash"); storedHash != layoutsHash {
+		if storedHash != "" {
+			log.Printf("tago: layouts changed, forcing full re-render")
+		}
+		_ = cacheDB.SetState("layouts_hash", layoutsHash)
 		layoutChanged = true
 	}
 
@@ -618,4 +631,27 @@ func outputHasEmptyContent(path string) bool {
 		return false
 	}
 	return bytes.Contains(data, []byte(`class="content"></div>`))
+}
+
+// hashDirMeta computes a short hash of the filenames, sizes, and mtimes of all
+// files under dir (non-recursive skipped: walk is recursive). Returns "" for
+// empty or missing dirs. Used to detect layout/static file changes without
+// reading file contents.
+func hashDirMeta(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return ""
+	}
+	h := sha256.New()
+	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		fmt.Fprintf(h, "%s:%d:%d\n", path, info.Size(), info.ModTime().UnixNano())
+		return nil
+	})
+	sum := fmt.Sprintf("%x", h.Sum(nil))
+	return sum[:16]
 }
