@@ -14,9 +14,12 @@ import (
 	highlighting "github.com/yuin/goldmark-highlighting/v2"
 	meta "github.com/yuin/goldmark-meta"
 	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/renderer/html"
+	"github.com/yuin/goldmark/text"
+	"github.com/yuin/goldmark/util"
 
 	chromahtml "github.com/alecthomas/chroma/v2/formatters/html"
 	"github.com/alecthomas/chroma/v2/styles"
@@ -72,6 +75,53 @@ func HashFile(path string) (string, error) {
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
+// mdLinkRewriter strips ".md" from local link destinations so that markdown
+// files can reference each other with relative .md paths while the rendered
+// HTML links point to the clean URL (e.g. "00xx/1.md" → "00xx/1/").
+type mdLinkRewriter struct{}
+
+func (mdLinkRewriter) Transform(doc *ast.Document, _ text.Reader, _ parser.Context) {
+	ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		var dest []byte
+		switch v := n.(type) {
+		case *ast.Link:
+			dest = v.Destination
+		case *ast.Image:
+			dest = v.Destination
+		default:
+			return ast.WalkContinue, nil
+		}
+		// Only rewrite local relative paths that end with ".md"
+		d := string(dest)
+		if strings.Contains(d, "://") || !strings.HasSuffix(d, ".md") {
+			return ast.WalkContinue, nil
+		}
+		// Strip .md; add trailing slash for clean URL
+		clean := strings.TrimSuffix(d, ".md") + "/"
+		switch v := n.(type) {
+		case *ast.Link:
+			v.Destination = []byte(clean)
+		case *ast.Image:
+			v.Destination = []byte(clean)
+		}
+		return ast.WalkContinue, nil
+	})
+}
+
+// mdLinkRewriterExt is a goldmark extension that registers mdLinkRewriter.
+type mdLinkRewriterExt struct{}
+
+func (mdLinkRewriterExt) Extend(m goldmark.Markdown) {
+	m.Parser().AddOptions(
+		parser.WithASTTransformers(
+			util.Prioritized(mdLinkRewriter{}, 999),
+		),
+	)
+}
+
 // mdRenderer is a shared goldmark instance.
 var mdRenderer goldmark.Markdown
 
@@ -80,6 +130,7 @@ func init() {
 		goldmark.WithExtensions(
 			extension.GFM,
 			meta.Meta,
+			mdLinkRewriterExt{},
 			highlighting.NewHighlighting(
 				highlighting.WithStyle("github"),
 				highlighting.WithGuessLanguage(true),
