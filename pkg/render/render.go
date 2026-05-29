@@ -425,6 +425,13 @@ func (r *Renderer) renderToFile(kind, outputPath string, data *TemplateData) err
 		return err
 	}
 
+	// Clone so each goroutine gets its own copy; html/template lazily initializes
+	// its escaping maps on first Execute, and concurrent initialization races.
+	t, err = t.Clone()
+	if err != nil {
+		return fmt.Errorf("clone template %q: %w", kind, err)
+	}
+
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", filepath.Dir(outputPath), err)
 	}
