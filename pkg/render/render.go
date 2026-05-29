@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tamnd/tago/pkg/content"
@@ -74,6 +75,7 @@ type Renderer struct {
 	layoutsDir  string
 	liveReload  bool
 	tmplCache   map[string]*template.Template
+	tmplMu      sync.Mutex
 }
 
 // New creates a new Renderer.
@@ -207,7 +209,11 @@ var funcMap = template.FuncMap{
 
 // getTemplate returns a compiled template for the given kind.
 // It first checks layoutsDir, then falls back to embedded defaults.
+// Safe for concurrent use.
 func (r *Renderer) getTemplate(kind string) (*template.Template, error) {
+	r.tmplMu.Lock()
+	defer r.tmplMu.Unlock()
+
 	if t, ok := r.tmplCache[kind]; ok {
 		return t, nil
 	}
@@ -437,6 +443,8 @@ func (r *Renderer) renderToFile(kind, outputPath string, data *TemplateData) err
 
 // InvalidateCache clears the template cache (useful after layout file changes).
 func (r *Renderer) InvalidateCache() {
+	r.tmplMu.Lock()
+	defer r.tmplMu.Unlock()
 	r.tmplCache = make(map[string]*template.Template)
 }
 
