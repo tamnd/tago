@@ -76,6 +76,7 @@ type flags struct {
 	baseURL     string
 	title       string
 	desc        string
+	lang        string // default language code, e.g. "en", "vi", "ja"
 	clean       bool
 	port        int
 }
@@ -228,6 +229,10 @@ func loadTOML(f *flags) {
 			if f.theme == "" {
 				f.theme = val
 			}
+		case "lang", "defaultLang", "default_lang":
+			if f.lang == "" {
+				f.lang = val
+			}
 		}
 	}
 }
@@ -293,6 +298,11 @@ func trim(s string) string {
 func runBuild(args []string) {
 	f := parseFlags(args)
 
+	defaultLang := "en"
+	if f.lang != "" {
+		defaultLang = f.lang
+	}
+
 	cfg := &build.Config{
 		ContentDir:     f.content,
 		OutputDir:      f.output,
@@ -300,7 +310,7 @@ func runBuild(args []string) {
 		ThemeStaticDir: f.themeStatic,
 		LayoutsDir:     f.layouts,
 		BaseURL:        f.baseURL,
-		DefaultLang:    "en",
+		DefaultLang:    defaultLang,
 		SiteTitle:      f.title,
 		SiteDesc:       f.desc,
 		Clean:          f.clean,
@@ -319,6 +329,11 @@ func runBuild(args []string) {
 func runServe(args []string) {
 	f := parseFlags(args)
 
+	serveLang := "en"
+	if f.lang != "" {
+		serveLang = f.lang
+	}
+
 	cfg := &build.Config{
 		ContentDir:     f.content,
 		OutputDir:      f.output,
@@ -326,7 +341,7 @@ func runServe(args []string) {
 		ThemeStaticDir: f.themeStatic,
 		LayoutsDir:     f.layouts,
 		BaseURL:        fmt.Sprintf("http://localhost:%d/", f.port),
-		DefaultLang:    "en",
+		DefaultLang:    serveLang,
 		SiteTitle:      f.title,
 		SiteDesc:       f.desc,
 		Clean:          f.clean,

@@ -337,8 +337,8 @@ func Build(cfg *Config) (*Stats, error) {
 	// structuralChange: pages added/deleted or metadata (title/tags/section/kind)
 	//   changed → graph, tree, calendar, 404 all depend on page structure.
 	// contentChange: any file changed (content or metadata) → search + sitemap.
-	contentChange := len(changedFiles) > 0 || len(deletedFiles) > 0
-	structuralChange := len(deletedFiles) > 0 || structurallyChanged(changedPages, cachedPageMap)
+	contentChange := len(changedFiles) > 0 || len(deletedFiles) > 0 || layoutChanged
+	structuralChange := len(deletedFiles) > 0 || structurallyChanged(changedPages, cachedPageMap) || layoutChanged
 
 	type indexTask struct {
 		name string
