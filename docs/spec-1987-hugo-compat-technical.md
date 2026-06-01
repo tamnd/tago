@@ -201,12 +201,35 @@ Taxonomy pages (kind="taxonomy") and term pages (kind="term") use the default
 taxonomy template if no theme template is found. The taxonomy list (`.Pages`)
 contains all pages with that tag/category.
 
+`SiteData.Taxonomies()` returns `map[string]any` where each value is
+`map[string]TermEntry`. Built from all pages' Tags and Categories:
+
+```go
+func (s *SiteData) Taxonomies() map[string]any {
+    // builds tagCounts from p.Tags, catCounts from p.Categories
+    // returns {"tags": map[string]TermEntry{...}, "categories": map[string]TermEntry{...}}
+}
+```
+
 TermEntry used in `range .Site.Taxonomies.tags`:
 - `.Name` — term string (e.g. "golang")
-- `.Count` — number of pages
-- `.Term` — alias for Name (some themes use .Term)
-- `.Page()` — nil (Hugo returns a Page, we return nil)
-- `.Pages()` — nil HugoPageList (Hugo returns tagged pages)
+- `.Count` — number of pages with this term
+- `.Term` — alias for Name (some themes use .Term instead of .Name)
+- `.Page()` — nil (Hugo returns a Page; we return nil — stub)
+- `.Pages()` — nil HugoPageList (Hugo returns tagged pages; we return nil — stub)
+
+Template usage pattern:
+```
+{{ range $name, $term := .Site.Taxonomies.tags }}
+  {{ $term.Name }}: {{ $term.Count }}
+{{ end }}
+```
+
+Also accessed via TermsData on taxonomy pages:
+```
+{{ range .Data.Terms.Alphabetical }}{{ .Name }}{{ end }}
+{{ range .Data.Terms.ByCount }}{{ .Count }}{{ end }}
+```
 
 ## Where function
 
