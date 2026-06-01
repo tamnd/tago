@@ -77,8 +77,14 @@ type flags struct {
 	title           string
 	desc            string
 	lang            string // default language code, e.g. "en", "vi", "ja"
+	editURLBase     string
 	clean           bool
 	syntaxHighlight bool // enable Chroma server-side syntax highlighting
+	buildDrafts     bool
+	buildFuture     bool
+	buildExpired    bool
+	params          map[string]any    // from [params] in tago.toml
+	taxonomies      map[string]string // from [taxonomies] in tago.toml
 	port            int
 }
 
@@ -138,6 +144,12 @@ func parseFlags(args []string) *flags {
 			}
 		case "--clean":
 			f.clean = true
+		case "--buildDrafts", "--build-drafts", "-D":
+			f.buildDrafts = true
+		case "--buildFuture", "--build-future", "-F":
+			f.buildFuture = true
+		case "--buildExpired", "--build-expired", "-E":
+			f.buildExpired = true
 		case "--syntax-highlight":
 			f.syntaxHighlight = true
 		case "--port":
@@ -190,54 +202,87 @@ func parseFlags(args []string) *flags {
 	return f
 }
 
-// loadTOML reads basic settings from tago.toml if present.
+// loadTOML reads settings from tago.toml if present.
+// Supports [params] and [taxonomies] sections.
 func loadTOML(f *flags) {
 	data, err := os.ReadFile("tago.toml")
 	if err != nil {
 		return
 	}
 
+	section := "" // current [section] header
 	lines := splitLines(string(data))
 	for _, line := range lines {
+		// Detect section headers like [params] or [taxonomies]
+		trimmed := trim(line)
+		if len(trimmed) > 2 && trimmed[0] == '[' && trimmed[len(trimmed)-1] == ']' {
+			section = trim(trimmed[1 : len(trimmed)-1])
+			continue
+		}
+
 		key, val, ok := parseTOMLLine(line)
 		if !ok {
 			continue
 		}
-		switch key {
-		case "title":
-			if f.title == "My Site" {
-				f.title = val
+
+		switch section {
+		case "params":
+			if f.params == nil {
+				f.params = make(map[string]any)
 			}
-		case "baseURL", "base_url":
-			if f.baseURL == "http://localhost:1313/" {
-				f.baseURL = val
+			f.params[key] = val
+		case "taxonomies":
+			if f.taxonomies == nil {
+				f.taxonomies = make(map[string]string)
 			}
-		case "description":
-			if f.desc == "" {
-				f.desc = val
+			f.taxonomies[key] = val
+		default:
+			switch key {
+			case "title":
+				if f.title == "My Site" {
+					f.title = val
+				}
+			case "baseURL", "base_url":
+				if f.baseURL == "http://localhost:1313/" {
+					f.baseURL = val
+				}
+			case "description":
+				if f.desc == "" {
+					f.desc = val
+				}
+			case "contentDir":
+				if f.content == "content" {
+					f.content = val
+				}
+			case "outputDir":
+				if f.output == "public" {
+					f.output = val
+				}
+			case "staticDir":
+				if f.static == "static" {
+					f.static = val
+				}
+			case "theme":
+				if f.theme == "" {
+					f.theme = val
+				}
+			case "lang", "defaultLang", "defaultContentLanguage", "default_lang":
+				if f.lang == "" {
+					f.lang = val
+				}
+			case "syntaxHighlight", "syntax_highlight":
+				f.syntaxHighlight = val == "true" || val == "1" || val == "yes"
+			case "buildDrafts", "build_drafts":
+				f.buildDrafts = val == "true" || val == "1" || val == "yes"
+			case "buildFuture", "build_future":
+				f.buildFuture = val == "true" || val == "1" || val == "yes"
+			case "buildExpired", "build_expired":
+				f.buildExpired = val == "true" || val == "1" || val == "yes"
+			case "editURL", "edit_url", "editURLBase":
+				if f.editURLBase == "" {
+					f.editURLBase = val
+				}
 			}
-		case "contentDir":
-			if f.content == "content" {
-				f.content = val
-			}
-		case "outputDir":
-			if f.output == "public" {
-				f.output = val
-			}
-		case "staticDir":
-			if f.static == "static" {
-				f.static = val
-			}
-		case "theme":
-			if f.theme == "" {
-				f.theme = val
-			}
-		case "lang", "defaultLang", "default_lang":
-			if f.lang == "" {
-				f.lang = val
-			}
-		case "syntaxHighlight", "syntax_highlight":
-			f.syntaxHighlight = val == "true" || val == "1" || val == "yes"
 		}
 	}
 }
@@ -318,9 +363,15 @@ func runBuild(args []string) {
 		DefaultLang:     defaultLang,
 		SiteTitle:       f.title,
 		SiteDesc:        f.desc,
+		EditURLBase:     f.editURLBase,
 		Clean:           f.clean,
 		LiveReload:      false,
 		SyntaxHighlight: f.syntaxHighlight,
+		BuildDrafts:     f.buildDrafts,
+		BuildFuture:     f.buildFuture,
+		BuildExpired:    f.buildExpired,
+		Params:          f.params,
+		Taxonomies:      f.taxonomies,
 	}
 
 	stats, err := build.Build(cfg)
@@ -341,17 +392,24 @@ func runServe(args []string) {
 	}
 
 	cfg := &build.Config{
-		ContentDir:     f.content,
-		OutputDir:      f.output,
-		StaticDir:      f.static,
-		ThemeStaticDir: f.themeStatic,
-		LayoutsDir:     f.layouts,
-		BaseURL:        fmt.Sprintf("http://localhost:%d/", f.port),
-		DefaultLang:    serveLang,
-		SiteTitle:      f.title,
-		SiteDesc:       f.desc,
-		Clean:          f.clean,
-		LiveReload:     true,
+		ContentDir:      f.content,
+		OutputDir:       f.output,
+		StaticDir:       f.static,
+		ThemeStaticDir:  f.themeStatic,
+		LayoutsDir:      f.layouts,
+		BaseURL:         fmt.Sprintf("http://localhost:%d/", f.port),
+		DefaultLang:     serveLang,
+		SiteTitle:       f.title,
+		SiteDesc:        f.desc,
+		EditURLBase:     f.editURLBase,
+		Clean:           f.clean,
+		LiveReload:      true,
+		SyntaxHighlight: f.syntaxHighlight,
+		BuildDrafts:     f.buildDrafts,
+		BuildFuture:     f.buildFuture,
+		BuildExpired:    f.buildExpired,
+		Params:          f.params,
+		Taxonomies:      f.taxonomies,
 	}
 
 	// Initial build

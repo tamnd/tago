@@ -519,3 +519,91 @@ var defaultTemplates = map[string]string{
 </script>
 {{end}}`,
 }
+
+// internalTemplates holds Hugo's built-in _internal/ templates.
+// These are referenced by themes as {{ template "_internal/opengraph.html" . }} etc.
+// Context is *render.TemplateData, so page fields are under .Page and site fields under .Site.
+var internalTemplates = map[string]string{
+	"_internal/opengraph.html": `<meta property="og:title" content="{{ .Page.Title }}" />
+<meta property="og:description" content="{{ with .Page.Description }}{{ . }}{{ else }}{{ with .Site.Params.description }}{{ . }}{{ end }}{{ end }}" />
+<meta property="og:type" content="{{ if .Page.IsPage }}article{{ else }}website{{ end }}" />
+<meta property="og:url" content="{{ .Page.Permalink }}" />
+{{- with .Page.Params.images }}{{- range first 6 . }}
+<meta property="og:image" content="{{ . | absURL }}" />
+{{- end }}{{- else }}{{- with .Site.Params.images }}
+<meta property="og:image" content="{{ index . 0 | absURL }}" />
+{{- end }}{{- end }}
+{{- if .Page.IsPage }}
+{{- if not .Page.PublishDate.IsZero }}<meta property="article:published_time" content="{{ .Page.PublishDate.Format "2006-01-02T15:04:05-07:00" }}"/>{{ end }}
+{{- if not .Page.Lastmod.IsZero }}<meta property="article:modified_time" content="{{ .Page.Lastmod.Format "2006-01-02T15:04:05-07:00" }}"/>{{ end }}
+{{- end }}`,
+
+	"_internal/twitter_cards.html": `<meta name="twitter:card" content="summary"/>
+<meta name="twitter:title" content="{{ .Page.Title }}"/>
+<meta name="twitter:description" content="{{ with .Page.Description }}{{ . }}{{ else }}{{ with .Site.Params.description }}{{ . }}{{ end }}{{ end }}"/>
+{{- with .Site.Params.twitter }}<meta name="twitter:site" content="@{{ . }}"/>{{ end }}`,
+
+	"_internal/schema.html": `{{ if .Page.IsPage }}<script type="application/ld+json">
+{
+  "@context": "http://schema.org",
+  "@type": "BlogPosting",
+  "headline": {{ .Page.Title | jsonify }},
+  "url": "{{ .Page.Permalink }}",
+  "wordCount": "{{ .Page.WordCount }}"{{ if not .Page.PublishDate.IsZero }},
+  "datePublished": "{{ .Page.PublishDate.Format "2006-01-02T15:04:05-07:00" }}"{{ end }}{{ if not .Page.Lastmod.IsZero }},
+  "dateModified": "{{ .Page.Lastmod.Format "2006-01-02T15:04:05-07:00" }}"{{ end }},
+  "author": {
+    "@type": "Person",
+    "name": {{ with .Page.Params.author }}{{ . | jsonify }}{{ else }}{{ .Site.Title | jsonify }}{{ end }}
+  },
+  "description": {{ with .Page.Description }}{{ . | jsonify }}{{ else }}""{{ end }}
+}
+</script>{{ end }}`,
+
+	"_internal/google_analytics.html": `{{- with .Site.Params.googleanalytics -}}
+<script async src="https://www.googletagmanager.com/gtag/js?id={{ . }}"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+  gtag('config', '{{ . }}');
+</script>
+{{- end -}}`,
+
+	"_internal/google_analytics_async.html": `{{- with .Site.Params.googleanalytics -}}
+<script>
+(function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+(i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+})(window,document,'script','https://www.google-analytics.com/analytics.js','ga');
+ga('create', '{{ . }}', 'auto');
+ga('send', 'pageview');
+</script>
+{{- end -}}`,
+
+	"_internal/disqus.html": `{{- with .Site.Params.disqusShortname -}}
+<div id="disqus_thread"></div>
+<script>
+var disqus_config = function () {
+  this.page.url = "{{ $.Page.Permalink }}";
+  this.page.identifier = "{{ $.Page.RelPermalink }}";
+};
+(function() {
+var d = document, s = d.createElement('script');
+s.src = 'https://{{ . }}.disqus.com/embed.js';
+s.setAttribute('data-timestamp', +new Date());
+(d.head || d.body).appendChild(s);
+})();
+</script>
+{{- end -}}`,
+
+	"_internal/pagination.html": `{{ if .Paginator }}
+{{ with .Paginator }}
+<nav class="pagination">
+  {{ if .HasPrev }}<a href="{{ .Prev.URL }}">&laquo; Prev</a>{{ end }}
+  <span>Page {{ .PageNumber }} of {{ .TotalPages }}</span>
+  {{ if .HasNext }}<a href="{{ .Next.URL }}">Next &raquo;</a>{{ end }}
+</nav>
+{{ end }}
+{{ end }}`,
+}

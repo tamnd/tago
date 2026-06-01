@@ -102,6 +102,61 @@ func BuildTree(pages []*Page) {
 	for _, p := range pages {
 		p.Ancestors = buildAncestors(p)
 	}
+
+	// Apply cascade: collect cascade maps from all ancestors (nearest wins),
+	// then apply missing fields to each descendant page.
+	for _, p := range pages {
+		// Build merged cascade from root → immediate parent (root first, parent last = nearest wins)
+		var cascades []map[string]any
+		for _, anc := range p.Ancestors {
+			if len(anc.Cascade) > 0 {
+				cascades = append(cascades, anc.Cascade)
+			}
+		}
+		if len(cascades) == 0 {
+			continue
+		}
+		// Merge: later (closer ancestor) overrides earlier
+		merged := make(map[string]any)
+		for _, c := range cascades {
+			for k, v := range c {
+				merged[k] = v
+			}
+		}
+		applyCascade(p, merged)
+	}
+}
+
+// applyCascade applies cascaded front matter values to a page, only for fields
+// that the page has not explicitly set.
+func applyCascade(p *Page, cascade map[string]any) {
+	if v, ok := cascade["draft"]; ok && !p.Draft {
+		p.Draft = toBool(v)
+	}
+	if v, ok := cascade["type"]; ok && p.Type == "" {
+		p.Type = toString(v)
+	}
+	if v, ok := cascade["layout"]; ok && p.Layout == "" {
+		p.Layout = toString(v)
+	}
+	if v, ok := cascade["tags"]; ok && len(p.Tags) == 0 {
+		p.Tags = toStringSlice(v)
+	}
+	if v, ok := cascade["categories"]; ok && len(p.Categories) == 0 {
+		p.Categories = toStringSlice(v)
+	}
+	if v, ok := cascade["noindex"]; ok && !p.NoIndex {
+		p.NoIndex = toBool(v)
+	}
+	// Any unrecognised cascade keys go to Params if not already set
+	if p.Params == nil {
+		p.Params = make(map[string]any)
+	}
+	for k, v := range cascade {
+		if _, exists := p.Params[k]; !exists {
+			p.Params[k] = v
+		}
+	}
 }
 
 // parentOf returns the permalink of the parent section.

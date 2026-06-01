@@ -36,7 +36,16 @@ CREATE TABLE IF NOT EXISTS page_cache (
     kind           TEXT,
     content_plain  TEXT,
     file_size      INT DEFAULT 0,
-    file_mtime     INT DEFAULT 0
+    file_mtime     INT DEFAULT 0,
+    slug           TEXT,
+    page_url       TEXT,
+    aliases        TEXT,
+    publish_date   TEXT,
+    expiry_date    TEXT,
+    lastmod        TEXT,
+    categories     TEXT,
+    keywords       TEXT,
+    layout         TEXT
 );
 
 CREATE TABLE IF NOT EXISTS build_state (
@@ -63,20 +72,29 @@ type PageRecord struct {
 	LinkTitle     string
 	Description   string
 	Tags          []string
+	Categories    []string
+	Keywords      []string
 	Date          time.Time
+	PublishDate   time.Time
+	ExpiryDate    time.Time
+	Lastmod       time.Time
 	Section       string
 	Lang          string
 	Depth         int
 	WordCount     int
 	ReadingTime   int
 	Summary       string
-	ContentPlain  string // plain text for search (stripped HTML)
-	ContentHTML   string // rendered HTML body
+	ContentPlain  string
+	ContentHTML   string
 	Params        map[string]any
 	Weight        int
 	NoIndex       bool
 	ExcludeSearch bool
 	Type          string
+	Layout        string
+	Slug          string
+	URL           string
+	Aliases       []string
 	Draft         bool
 	Kind          string
 	BuiltAt       int64
@@ -93,9 +111,17 @@ var migrations = []string{
 	`ALTER TABLE page_cache ADD COLUMN file_size    INT DEFAULT 0`,
 	`ALTER TABLE page_cache ADD COLUMN file_mtime   INT DEFAULT 0`,
 	`CREATE INDEX IF NOT EXISTS idx_page_cache_stat ON page_cache (file_path, file_size, file_mtime)`,
-	// content_html is no longer stored; drop the column from existing DBs.
-	// Ignored on new DBs (column doesn't exist) and after first run (already dropped).
 	`ALTER TABLE page_cache DROP COLUMN content_html`,
+	// Hugo-compat fields added in v0.2.0
+	`ALTER TABLE page_cache ADD COLUMN slug          TEXT`,
+	`ALTER TABLE page_cache ADD COLUMN page_url      TEXT`,
+	`ALTER TABLE page_cache ADD COLUMN aliases       TEXT`,
+	`ALTER TABLE page_cache ADD COLUMN publish_date  TEXT`,
+	`ALTER TABLE page_cache ADD COLUMN expiry_date   TEXT`,
+	`ALTER TABLE page_cache ADD COLUMN lastmod       TEXT`,
+	`ALTER TABLE page_cache ADD COLUMN categories    TEXT`,
+	`ALTER TABLE page_cache ADD COLUMN keywords      TEXT`,
+	`ALTER TABLE page_cache ADD COLUMN layout        TEXT`,
 }
 
 // Open opens or creates the cache database at the given path.
@@ -172,7 +198,11 @@ func (c *Cache) LoadAll() ([]*PageRecord, error) {
 		SELECT file_path, file_hash, permalink, title, link_title, description,
 		       tags, date, section, lang, depth, word_count, summary, params,
 		       weight, no_index, exclude_search, type, draft, kind, built_at,
-		       COALESCE(reading_time, 0)
+		       COALESCE(reading_time, 0),
+		       COALESCE(slug,''), COALESCE(page_url,''), COALESCE(aliases,'[]'),
+		       COALESCE(publish_date,''), COALESCE(expiry_date,''), COALESCE(lastmod,''),
+		       COALESCE(categories,'[]'), COALESCE(keywords,'[]'), COALESCE(layout,''),
+		       COALESCE(file_size,0), COALESCE(file_mtime,0)
 		FROM page_cache
 	`)
 	if err != nil {
@@ -184,6 +214,8 @@ func (c *Cache) LoadAll() ([]*PageRecord, error) {
 	for rows.Next() {
 		r := &PageRecord{}
 		var tagsJSON, paramsJSON, dateStr string
+		var aliasesJSON, categoriesJSON, keywordsJSON string
+		var publishDateStr, expiryDateStr, lastmodStr string
 		var noIndex, excludeSearch, draft int
 		err := rows.Scan(
 			&r.FilePath, &r.FileHash, &r.Permalink, &r.Title, &r.LinkTitle,
@@ -191,6 +223,10 @@ func (c *Cache) LoadAll() ([]*PageRecord, error) {
 			&r.Depth, &r.WordCount, &r.Summary, &paramsJSON,
 			&r.Weight, &noIndex, &excludeSearch, &r.Type, &draft, &r.Kind, &r.BuiltAt,
 			&r.ReadingTime,
+			&r.Slug, &r.URL, &aliasesJSON,
+			&publishDateStr, &expiryDateStr, &lastmodStr,
+			&categoriesJSON, &keywordsJSON, &r.Layout,
+			&r.FileSize, &r.FileMtime,
 		)
 		if err != nil {
 			return nil, err
@@ -201,22 +237,45 @@ func (c *Cache) LoadAll() ([]*PageRecord, error) {
 		if tagsJSON != "" {
 			_ = json.Unmarshal([]byte(tagsJSON), &r.Tags)
 		}
+		if aliasesJSON != "" {
+			_ = json.Unmarshal([]byte(aliasesJSON), &r.Aliases)
+		}
+		if categoriesJSON != "" {
+			_ = json.Unmarshal([]byte(categoriesJSON), &r.Categories)
+		}
+		if keywordsJSON != "" {
+			_ = json.Unmarshal([]byte(keywordsJSON), &r.Keywords)
+		}
 		if paramsJSON != "" {
 			r.Params = make(map[string]any)
 			_ = json.Unmarshal([]byte(paramsJSON), &r.Params)
 		}
-		if dateStr != "" {
-			formats := []string{time.RFC3339, "2006-01-02T15:04:05", "2006-01-02"}
-			for _, f := range formats {
-				if t, err := time.Parse(f, dateStr); err == nil {
-					r.Date = t
-					break
-				}
-			}
+		r.Date = parseDate(dateStr)
+		r.PublishDate = parseDate(publishDateStr)
+		r.ExpiryDate = parseDate(expiryDateStr)
+		r.Lastmod = parseDate(lastmodStr)
+		if r.PublishDate.IsZero() {
+			r.PublishDate = r.Date
+		}
+		if r.Lastmod.IsZero() {
+			r.Lastmod = r.Date
 		}
 		records = append(records, r)
 	}
 	return records, rows.Err()
+}
+
+func parseDate(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	formats := []string{time.RFC3339, "2006-01-02T15:04:05", "2006-01-02"}
+	for _, f := range formats {
+		if t, err := time.Parse(f, s); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
 }
 
 // LoadPlainTexts returns file_path → content_plain for all cached pages.
@@ -243,8 +302,10 @@ const upsertSQL = `
 	    (file_path, file_hash, permalink, title, link_title, description,
 	     tags, date, section, lang, depth, word_count, reading_time, summary, params,
 	     weight, no_index, exclude_search, type, draft, kind, built_at, content_plain,
-	     file_size, file_mtime)
-	VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	     file_size, file_mtime,
+	     slug, page_url, aliases, publish_date, expiry_date, lastmod,
+	     categories, keywords, layout)
+	VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 	ON CONFLICT(file_path) DO UPDATE SET
 	    file_hash=excluded.file_hash,
 	    permalink=excluded.permalink,
@@ -269,31 +330,51 @@ const upsertSQL = `
 	    built_at=excluded.built_at,
 	    content_plain=excluded.content_plain,
 	    file_size=excluded.file_size,
-	    file_mtime=excluded.file_mtime
+	    file_mtime=excluded.file_mtime,
+	    slug=excluded.slug,
+	    page_url=excluded.page_url,
+	    aliases=excluded.aliases,
+	    publish_date=excluded.publish_date,
+	    expiry_date=excluded.expiry_date,
+	    lastmod=excluded.lastmod,
+	    categories=excluded.categories,
+	    keywords=excluded.keywords,
+	    layout=excluded.layout
 `
 
-func recordArgs(r *PageRecord, builtAt int64) []any {
-	tagsJSON := "[]"
-	if len(r.Tags) > 0 {
-		b, _ := json.Marshal(r.Tags)
-		tagsJSON = string(b)
+func marshalStrings(ss []string) string {
+	if len(ss) == 0 {
+		return "[]"
 	}
+	b, _ := json.Marshal(ss)
+	return string(b)
+}
+
+func recordArgs(r *PageRecord, builtAt int64) []any {
+	tagsJSON := marshalStrings(r.Tags)
+	aliasesJSON := marshalStrings(r.Aliases)
+	categoriesJSON := marshalStrings(r.Categories)
+	keywordsJSON := marshalStrings(r.Keywords)
 	paramsJSON := "{}"
 	if len(r.Params) > 0 {
 		b, _ := json.Marshal(r.Params)
 		paramsJSON = string(b)
 	}
-	dateStr := ""
-	if !r.Date.IsZero() {
-		dateStr = r.Date.Format(time.RFC3339)
+	fmtDate := func(t time.Time) string {
+		if t.IsZero() {
+			return ""
+		}
+		return t.Format(time.RFC3339)
 	}
 	return []any{
 		r.FilePath, r.FileHash, r.Permalink, r.Title, r.LinkTitle, r.Description,
-		tagsJSON, dateStr, r.Section, r.Lang,
+		tagsJSON, fmtDate(r.Date), r.Section, r.Lang,
 		r.Depth, r.WordCount, r.ReadingTime, r.Summary, paramsJSON,
 		r.Weight, boolToInt(r.NoIndex), boolToInt(r.ExcludeSearch), r.Type,
 		boolToInt(r.Draft), r.Kind, builtAt, r.ContentPlain,
 		r.FileSize, r.FileMtime,
+		r.Slug, r.URL, aliasesJSON, fmtDate(r.PublishDate), fmtDate(r.ExpiryDate), fmtDate(r.Lastmod),
+		categoriesJSON, keywordsJSON, r.Layout,
 	}
 }
 
