@@ -88,9 +88,49 @@ func (hp *HugoPage) IsHome() bool { return hp.Page.Kind == "home" }
 // IsSection returns true if page kind is "section".
 func (hp *HugoPage) IsSection() bool { return hp.Page.Kind == "section" }
 
-// PageData mirrors Hugo's .Data field on taxonomy/term pages (provides .Pages).
+// PageData mirrors Hugo's .Data field on taxonomy/term pages (provides .Pages and .Terms).
 type PageData struct {
-	Pages HugoPageList
+	Pages    HugoPageList
+	Terms    *TermsData
+}
+
+// TermsData wraps taxonomy terms and provides Hugo-compatible methods.
+type TermsData struct {
+	terms []TagCount
+}
+
+// Alphabetical returns terms sorted alphabetically with Name and Count.
+func (td *TermsData) Alphabetical() []TermEntry {
+	sorted := make([]TagCount, len(td.terms))
+	copy(sorted, td.terms)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Name < sorted[j].Name
+	})
+	entries := make([]TermEntry, len(sorted))
+	for i, t := range sorted {
+		entries[i] = TermEntry{Name: t.Name, Count: t.Count}
+	}
+	return entries
+}
+
+// ByCount returns terms sorted by count (descending).
+func (td *TermsData) ByCount() []TermEntry {
+	sorted := make([]TagCount, len(td.terms))
+	copy(sorted, td.terms)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Count > sorted[j].Count
+	})
+	entries := make([]TermEntry, len(sorted))
+	for i, t := range sorted {
+		entries[i] = TermEntry{Name: t.Name, Count: t.Count}
+	}
+	return entries
+}
+
+// TermEntry is a single taxonomy term with name and count.
+type TermEntry struct {
+	Name  string
+	Count int
 }
 
 // HugoPageList wraps []*HugoPage with Hugo-compatible methods.
@@ -136,6 +176,8 @@ type SiteLanguage struct {
 	LanguageName      string
 	LanguageDirection string
 	Weight            int
+	Locale            string // BCP 47 locale string (e.g. "en-US")
+	Direction         string // "ltr" or "rtl"
 }
 
 func (l *SiteLanguage) String() string {
@@ -153,6 +195,23 @@ func (l *SiteLanguage) Get(key string) any {
 // Hugo returns the hugo namespace (allows {{ .Site.Hugo.Version }} in templates).
 func (s *SiteData) Hugo() *hugoNamespace { return &hugoNamespace{} }
 
+// GetPage returns a stub page for the given path (used by themes to get section/taxonomy pages).
+func (s *SiteData) GetPage(args ...string) *siteHomeStub {
+	var path string
+	if len(args) == 1 {
+		path = args[0]
+	} else if len(args) >= 2 {
+		path = args[1]
+	}
+	baseURL := s.BaseURL
+	_ = path
+	return &siteHomeStub{baseURL: baseURL}
+}
+
+// Config returns a stub for site config (e.g. site.Config.Services.RSS.Limit).
+func (s *SiteData) Config() *siteConfigStub { return &siteConfigStub{} }
+
+
 // DisqusShortname returns empty string (stub).
 func (s *SiteData) DisqusShortname() string { return "" }
 
@@ -169,6 +228,41 @@ func (s *SiteData) Data() map[string]any { return nil }
 
 // Taxonomies returns empty map (stub for .Site.Taxonomies).
 func (s *SiteData) Taxonomies() map[string]any { return nil }
+
+// Home returns a fake home page stub for .Site.Home.RelPermalink etc.
+func (s *SiteData) Home() *siteHomeStub {
+	return &siteHomeStub{baseURL: s.BaseURL}
+}
+
+// siteHomeStub implements Hugo's .Site.Home methods.
+type siteHomeStub struct{ baseURL string }
+
+func (h *siteHomeStub) RelPermalink() string      { return "/" }
+func (h *siteHomeStub) Permalink() string         { return strings.TrimRight(h.baseURL, "/") + "/" }
+func (h *siteHomeStub) Title() string             { return "" }
+func (h *siteHomeStub) LinkTitle() string         { return "" }
+func (h *siteHomeStub) Description() string       { return "" }
+func (h *siteHomeStub) Summary() string           { return "" }
+func (h *siteHomeStub) Content() template.HTML    { return "" }
+func (h *siteHomeStub) IsHome() bool              { return true }
+func (h *siteHomeStub) IsPage() bool              { return false }
+func (h *siteHomeStub) IsSection() bool           { return false }
+func (h *siteHomeStub) IsNode() bool              { return true }
+func (h *siteHomeStub) Kind() string              { return "home" }
+func (h *siteHomeStub) Type() string              { return "page" }
+func (h *siteHomeStub) Section() string           { return "" }
+func (h *siteHomeStub) Translations() []any       { return nil }
+func (h *siteHomeStub) IsTranslated() bool        { return false }
+func (h *siteHomeStub) AllTranslations() []any    { return nil }
+func (h *siteHomeStub) Language() *SiteLanguage   { return nil }
+func (h *siteHomeStub) Lang() string              { return "" }
+func (h *siteHomeStub) Params() map[string]any    { return nil }
+func (h *siteHomeStub) Param(key string) any      { return nil }
+func (h *siteHomeStub) Date() HugoTime            { return HugoTime{} }
+func (h *siteHomeStub) Lastmod() HugoTime         { return HugoTime{} }
+
+// LastChange returns zero time (stub for .Site.LastChange).
+func (s *SiteData) LastChange() time.Time { return time.Time{} }
 
 // Param looks up a param in Site.Params (Hugo .Param method falls through to site).
 func (s *SiteData) Param(key string) any {
@@ -188,6 +282,21 @@ type AssetRefs struct {
 	ChromaCSS  string
 	Extra      map[string]string // original basename → fingerprinted URL
 }
+
+// siteConfigStub is a stub for .Site.Config / site.Config.
+type siteConfigStub struct{}
+
+func (c *siteConfigStub) Services() *siteServicesStub { return &siteServicesStub{} }
+
+type siteServicesStub struct{}
+
+func (s *siteServicesStub) RSS() *siteRSSStub           { return &siteRSSStub{} }
+func (s *siteServicesStub) Disqus() *siteDisqusStub     { return &siteDisqusStub{} }
+func (s *siteServicesStub) GoogleAnalytics() *siteGAStub { return &siteGAStub{} }
+
+type siteRSSStub struct{ Limit int }
+type siteDisqusStub struct{ Shortname string }
+type siteGAStub struct{ ID string }
 
 // TagCount holds a tag and its page count.
 type TagCount struct {
@@ -509,6 +618,16 @@ func (d *TemplateData) AlternativeOutputFormats() []any {
 	return nil
 }
 
+// OutputFormats returns a stub output formats object.
+func (d *TemplateData) OutputFormats() *outputFormatsStub {
+	return &outputFormatsStub{}
+}
+
+// outputFormatsStub implements Hugo's .OutputFormats methods.
+type outputFormatsStub struct{}
+
+func (o *outputFormatsStub) Get(name string) *stubResource { return nil }
+
 // Scratch returns a map stub for Hugo's .Scratch.
 func (d *TemplateData) Scratch() map[string]any {
 	return make(map[string]any)
@@ -524,13 +643,51 @@ func (d *TemplateData) Language() *SiteLanguage {
 
 // Data returns Hugo-compatible .Data field (for taxonomy/term pages).
 func (d *TemplateData) Data() *PageData {
-	return &PageData{Pages: d.Pages}
+	return &PageData{
+		Pages: d.Pages,
+		Terms: &TermsData{terms: d.Tags},
+	}
 }
 
 // GitInfo returns nil (stub for Hugo .GitInfo; nil makes {{- if .GitInfo }} false).
 func (d *TemplateData) GitInfo() any {
 	return nil
 }
+
+// Resources returns an empty page resources stub (stub for Hugo .Resources).
+func (d *TemplateData) Resources() *pageResourcesStub {
+	return &pageResourcesStub{}
+}
+
+// IsTranslated returns false (stub for multilingual support).
+func (d *TemplateData) IsTranslated() bool { return false }
+
+// Translations returns empty slice (stub).
+func (d *TemplateData) Translations() []any { return nil }
+
+// AllTranslations returns empty slice (stub).
+func (d *TemplateData) AllTranslations() []any { return nil }
+
+// TranslationKey returns empty string (stub).
+func (d *TemplateData) TranslationKey() string { return "" }
+
+// Store returns a scratch pad (stub for Hugo .Store).
+func (d *TemplateData) Store() map[string]any { return make(map[string]any) }
+
+// BundleType returns empty string (stub).
+func (d *TemplateData) BundleType() string { return "" }
+
+// CurrentSection returns the current page for section context.
+func (d *TemplateData) CurrentSection() *TemplateData { return d }
+
+// pageResourcesStub implements Hugo page resources methods.
+type pageResourcesStub struct{}
+
+func (r *pageResourcesStub) ByType(t string) []*stubResource     { return nil }
+func (r *pageResourcesStub) Match(pattern string) []*stubResource { return nil }
+func (r *pageResourcesStub) Get(name string) *stubResource        { return nil }
+func (r *pageResourcesStub) GetMatch(pattern string) *stubResource { return nil }
+func (r *pageResourcesStub) GetRemote(url string, opts ...any) *stubResource { return nil }
 
 // NextInSection returns the next page in the section (alias for .Next).
 func (d *TemplateData) NextInSection() *content.Page {
@@ -546,6 +703,33 @@ func (d *TemplateData) PrevInSection() *content.Page {
 func (d *TemplateData) TableOfContents() template.HTML {
 	return ""
 }
+
+// File returns a stub file info object (stub for Hugo .File).
+func (d *TemplateData) File() *pageFileStub {
+	if d.Page == nil {
+		return &pageFileStub{}
+	}
+	return &pageFileStub{filePath: d.Page.FilePath}
+}
+
+// pageFileStub implements Hugo's .File methods.
+type pageFileStub struct {
+	filePath string
+}
+
+func (f *pageFileStub) Path() string        { return f.filePath }
+func (f *pageFileStub) LogicalName() string { return filepath.Base(f.filePath) }
+func (f *pageFileStub) Dir() string         { return filepath.Dir(f.filePath) }
+func (f *pageFileStub) Ext() string         { return filepath.Ext(f.filePath) }
+func (f *pageFileStub) Filename() string    { return f.filePath }
+func (f *pageFileStub) ContentBaseName() string {
+	base := filepath.Base(f.filePath)
+	ext := filepath.Ext(base)
+	return strings.TrimSuffix(base, ext)
+}
+func (f *pageFileStub) TranslationBaseName() string { return f.ContentBaseName() }
+func (f *pageFileStub) BaseFileName() string        { return f.ContentBaseName() }
+func (f *pageFileStub) UniqueID() string            { return "" }
 
 // Truncated returns false (stub for Hugo .Truncated; true means Summary != full content).
 func (d *TemplateData) Truncated() bool {
@@ -898,6 +1082,20 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 		"urlize": func(s string) string {
 			return urlize(s)
 		},
+		"delimit": func(v any, delim string, last ...string) string {
+			cn := &collectionsNamespace{}
+			return cn.Delimit(v, delim, last...)
+		},
+		"anchorize": func(s string) string {
+			return strings.ToLower(regexp.MustCompile(`[^a-z0-9]+`).ReplaceAllString(s, "-"))
+		},
+		"htmlEscape": func(v any) string {
+			tn := &transformNamespace{}
+			return tn.HTMLEscape(v)
+		},
+		"htmlUnescape": func(s string) template.HTML {
+			return template.HTML(s)
+		},
 		"trimSlash": func(s string) string {
 			return strings.TrimRight(s, "/")
 		},
@@ -928,8 +1126,12 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 			}
 			return m
 		},
-		"hasPrefix": strings.HasPrefix,
-		"hasSuffix": strings.HasSuffix,
+		"hasPrefix": func(s, prefix any) bool {
+			return strings.HasPrefix(fmt.Sprintf("%v", s), fmt.Sprintf("%v", prefix))
+		},
+		"hasSuffix": func(s, suffix any) bool {
+			return strings.HasSuffix(fmt.Sprintf("%v", s), fmt.Sprintf("%v", suffix))
+		},
 
 		// ---- new Hugo-compatible functions ----
 
@@ -974,6 +1176,12 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 		"markdownify": func(s string) template.HTML {
 			return markdownifyString(s)
 		},
+		"emojify": func(s any) string {
+			if s == nil {
+				return ""
+			}
+			return fmt.Sprintf("%v", s)
+		},
 		"humanize":   humanize,
 		"title":      titleCase,
 		"lower":      strings.ToLower,
@@ -985,6 +1193,43 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 		"trimSuffix": strings.TrimSuffix,
 		"replace": func(s, old, newStr string) string {
 			return strings.ReplaceAll(s, old, newStr)
+		},
+		"findRE": func(pattern string, v any, args ...any) []string {
+			s := fmt.Sprintf("%v", v)
+			re, err := regexp.Compile(pattern)
+			if err != nil {
+				return nil
+			}
+			n := -1
+			if len(args) > 0 {
+				switch lv := args[0].(type) {
+				case int:
+					n = lv
+				}
+			}
+			matches := re.FindAllString(s, n)
+			if matches == nil {
+				return []string{}
+			}
+			return matches
+		},
+		"findRESubmatch": func(pattern string, v any, args ...any) [][]string {
+			s := fmt.Sprintf("%v", v)
+			re, err := regexp.Compile(pattern)
+			if err != nil {
+				return nil
+			}
+			n := -1
+			if len(args) > 0 {
+				if lv, ok := args[0].(int); ok {
+					n = lv
+				}
+			}
+			matches := re.FindAllStringSubmatch(s, n)
+			if matches == nil {
+				return [][]string{}
+			}
+			return matches
 		},
 		"replaceRE": func(pattern, repl string, v any) any {
 			var s string
@@ -1150,8 +1395,8 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 			}
 			return result
 		},
-		"append": func(ss []string, items ...string) []string {
-			return append(ss, items...)
+		"append": func(v any, args ...any) []any {
+			return hugoAppend(v, args...)
 		},
 		"slice": func(items ...any) []any {
 			return items
@@ -1347,6 +1592,42 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 	// collections namespace
 	fm["collections"] = func() *collectionsNamespace { return &collectionsNamespace{} }
 
+	// compare namespace
+	fm["compare"] = func() *compareNamespace { return &compareNamespace{} }
+
+	// partials namespace (partials.Include as alternative to partial function)
+	fm["partials"] = func() *partialsNamespace { return &partialsNamespace{r: r} }
+
+	// transform namespace
+	fm["transform"] = func() *transformNamespace { return &transformNamespace{} }
+
+	// math namespace (math.Add, math.Ceil, etc.)
+	fm["math"] = func() *mathNamespace { return &mathNamespace{} }
+
+	// fmt namespace (fmt.Printf, fmt.Print, fmt.Warnf etc.)
+	fm["fmt"] = func() *fmtNamespace { return &fmtNamespace{} }
+
+	// lang namespace (lang.Translate, lang.FormatNumber etc.)
+	fm["lang"] = func() *langNamespace { return &langNamespace{r: r} }
+
+	// return: Hugo 0.117+ partial return value (stub - no-op in standard Go templates)
+	fm["return"] = func(v ...any) string { return "" }
+
+	// strings namespace (Hugo 0.XX+)
+	fm["strings"] = func() *stringsNamespace { return &stringsNamespace{} }
+
+	// safe namespace (safe.HTML, safe.CSS, safe.URL etc.)
+	fm["safe"] = func() *safeNamespace { return &safeNamespace{} }
+
+	// css namespace (css.Build, css.Sass etc.)
+	fm["css"] = func() *cssNamespace { return &cssNamespace{} }
+
+	// js namespace (js.Build etc.)
+	fm["js"] = func() *jsNamespace { return &jsNamespace{} }
+
+	// images namespace (images.Filter, images.Resize etc.)
+	fm["images"] = func() *imagesNamespace { return &imagesNamespace{} }
+
 	return fm
 }
 
@@ -1421,6 +1702,52 @@ func (rn *resourcesNamespace) Concat(name string, resources ...any) *stubResourc
 func (rn *resourcesNamespace) Copy(name string, src *stubResource) *stubResource {
 	return &stubResource{path: name}
 }
+func (rn *resourcesNamespace) Match(pattern string) []*stubResource {
+	return nil
+}
+func (rn *resourcesNamespace) GetMatch(pattern string) *stubResource {
+	return &stubResource{path: pattern}
+}
+func (rn *resourcesNamespace) Minify(r ...any) *stubResource {
+	if len(r) > 0 {
+		if sr, ok := r[0].(*stubResource); ok {
+			return sr
+		}
+	}
+	return &stubResource{}
+}
+func (rn *resourcesNamespace) Fingerprint(r ...any) *stubResource {
+	if len(r) > 0 {
+		if sr, ok := r[0].(*stubResource); ok {
+			return sr
+		}
+	}
+	return &stubResource{}
+}
+func (rn *resourcesNamespace) ToCSS(args ...any) *stubResource {
+	for _, a := range args {
+		if sr, ok := a.(*stubResource); ok {
+			return sr
+		}
+	}
+	return &stubResource{}
+}
+func (rn *resourcesNamespace) PostCSS(args ...any) *stubResource {
+	for _, a := range args {
+		if sr, ok := a.(*stubResource); ok {
+			return sr
+		}
+	}
+	return &stubResource{}
+}
+func (rn *resourcesNamespace) Babel(args ...any) *stubResource {
+	for _, a := range args {
+		if sr, ok := a.(*stubResource); ok {
+			return sr
+		}
+	}
+	return &stubResource{}
+}
 
 // Hugo pipe functions (standalone, for pipeline syntax: {{ $res | toCSS }})
 // These are also registered as flat funcMap entries below.
@@ -1437,6 +1764,9 @@ func (tn *templatesNamespace) Exists(name string) bool {
 	_, err := os.Stat(filepath.Join(tn.layoutsDir, name))
 	return err == nil
 }
+
+// Defer is a stub for Hugo's templates.Defer feature (Hugo 0.134+).
+func (tn *templatesNamespace) Defer(args ...any) string { return "" }
 
 // pathNamespace implements the `path` template namespace.
 type pathNamespace struct{}
@@ -1496,15 +1826,695 @@ func (cn *cryptoNamespace) SHA256(s string) string { return "" }
 func (cn *cryptoNamespace) FNV32a(s string) string { return "" }
 func (cn *cryptoNamespace) HMAC(hash, msg, secret string) string { return "" }
 
-// collectionsNamespace is a stub for the `collections` namespace.
+// collectionsNamespace implements Hugo's `collections` namespace.
 type collectionsNamespace struct{}
 
 func (cn *collectionsNamespace) Append(v any, items ...any) []any {
-	result, _ := v.([]any)
-	return append(result, items...)
+	return hugoAppend(v, items...)
 }
-func (cn *collectionsNamespace) Uniq(v any) any     { return v }
-func (cn *collectionsNamespace) Where(v any, key, val string) any { return v }
+
+// hugoAppend mirrors Hugo's append behavior:
+// When used in a pipeline ($slice | append $item), Go templates call append($item, $slice).
+// So if v is not a slice but the last arg is, we treat the last arg as the base collection.
+func hugoAppend(v any, args ...any) []any {
+	rv := reflect.ValueOf(v)
+	vIsSlice := rv.IsValid() && (rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array)
+
+	var base reflect.Value
+	var newItems []any
+
+	if vIsSlice {
+		base = rv
+		newItems = args
+	} else if len(args) > 0 {
+		// pipeline case: last arg is the existing slice, v + preceding args are items to add
+		lastArg := args[len(args)-1]
+		rl := reflect.ValueOf(lastArg)
+		if rl.IsValid() && (rl.Kind() == reflect.Slice || rl.Kind() == reflect.Array) {
+			base = rl
+			newItems = append([]any{v}, args[:len(args)-1]...)
+		} else {
+			// neither is a slice — just collect all as items
+			newItems = append([]any{v}, args...)
+		}
+	} else {
+		newItems = []any{v}
+	}
+
+	var result []any
+	if base.IsValid() {
+		for i := 0; i < base.Len(); i++ {
+			result = append(result, base.Index(i).Interface())
+		}
+	}
+	return append(result, newItems...)
+}
+
+func (cn *collectionsNamespace) Uniq(v any) any { return v }
+
+// Where filters a collection. Supports both 3-arg (collection, key, value)
+// and 4-arg (collection, key, operator, value) forms.
+func (cn *collectionsNamespace) Where(args ...any) any {
+	if len(args) < 3 {
+		return nil
+	}
+	collection := args[0]
+	key, _ := args[1].(string)
+	var op, valAny any
+	if len(args) == 3 {
+		op = "="
+		valAny = args[2]
+	} else {
+		op = args[2]
+		valAny = args[3]
+	}
+	opStr, _ := op.(string)
+	rv := reflect.ValueOf(collection)
+	if rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array {
+		return collection
+	}
+	var result []any
+	for i := 0; i < rv.Len(); i++ {
+		item := rv.Index(i).Interface()
+		itemVal := getNestedField(item, key)
+		if matchOp(itemVal, opStr, valAny) {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+// getNestedField retrieves a field value from an item by dot-separated key path.
+func getNestedField(item any, key string) any {
+	if item == nil || key == "" {
+		return nil
+	}
+	parts := strings.SplitN(key, ".", 2)
+	rv := reflect.ValueOf(item)
+	for rv.Kind() == reflect.Ptr || rv.Kind() == reflect.Interface {
+		if rv.IsNil() {
+			return nil
+		}
+		rv = rv.Elem()
+	}
+	var val reflect.Value
+	switch rv.Kind() {
+	case reflect.Struct:
+		val = rv.FieldByName(parts[0])
+		if !val.IsValid() {
+			// try method
+			m := reflect.ValueOf(item).MethodByName(parts[0])
+			if m.IsValid() {
+				res := m.Call(nil)
+				if len(res) > 0 {
+					val = res[0]
+				}
+			}
+		}
+	case reflect.Map:
+		val = rv.MapIndex(reflect.ValueOf(parts[0]))
+	default:
+		return nil
+	}
+	if !val.IsValid() {
+		return nil
+	}
+	if len(parts) == 2 {
+		return getNestedField(val.Interface(), parts[1])
+	}
+	return val.Interface()
+}
+
+// matchOp compares itemVal to expected using the given operator.
+func matchOp(itemVal any, op string, expected any) bool {
+	switch op {
+	case "!=", "ne":
+		return !reflect.DeepEqual(itemVal, expected)
+	case ">", "gt":
+		return compareValues(itemVal, expected) > 0
+	case ">=", "ge":
+		return compareValues(itemVal, expected) >= 0
+	case "<", "lt":
+		return compareValues(itemVal, expected) < 0
+	case "<=", "le":
+		return compareValues(itemVal, expected) <= 0
+	case "in":
+		return inCollection(expected, itemVal)
+	case "not in":
+		return !inCollection(expected, itemVal)
+	default: // "=", "eq", ""
+		return reflect.DeepEqual(itemVal, expected)
+	}
+}
+
+// compareValues returns -1, 0, or 1 for numeric/string comparisons.
+func compareValues(a, b any) int {
+	af := toFloat64(a)
+	bf := toFloat64(b)
+	if af < bf {
+		return -1
+	} else if af > bf {
+		return 1
+	}
+	return 0
+}
+
+func toFloat64(v any) float64 {
+	switch x := v.(type) {
+	case int:
+		return float64(x)
+	case int64:
+		return float64(x)
+	case float64:
+		return x
+	case float32:
+		return float64(x)
+	}
+	return 0
+}
+
+func (cn *collectionsNamespace) Slice(items ...any) []any { return items }
+
+func (cn *collectionsNamespace) Dictionary(pairs ...any) map[string]any {
+	m := make(map[string]any)
+	for i := 0; i+1 < len(pairs); i += 2 {
+		if k, ok := pairs[i].(string); ok {
+			m[k] = pairs[i+1]
+		}
+	}
+	return m
+}
+
+func (cn *collectionsNamespace) Merge(base, overlay any) map[string]any {
+	m := make(map[string]any)
+	if bm, ok := base.(map[string]any); ok {
+		for k, v := range bm {
+			m[k] = v
+		}
+	}
+	if om, ok := overlay.(map[string]any); ok {
+		for k, v := range om {
+			m[k] = v
+		}
+	}
+	return m
+}
+
+func (cn *collectionsNamespace) In(collection, val any) bool {
+	return inCollection(collection, val)
+}
+
+func (cn *collectionsNamespace) Index(v any, indices ...any) any {
+	if len(indices) == 0 {
+		return v
+	}
+	rv := reflect.ValueOf(v)
+	for _, idx := range indices {
+		switch rv.Kind() {
+		case reflect.Map:
+			rv = rv.MapIndex(reflect.ValueOf(idx))
+		case reflect.Slice, reflect.Array:
+			if i, ok := idx.(int); ok && i >= 0 && i < rv.Len() {
+				rv = rv.Index(i)
+			} else {
+				return nil
+			}
+		default:
+			return nil
+		}
+		if !rv.IsValid() {
+			return nil
+		}
+	}
+	return rv.Interface()
+}
+
+func (cn *collectionsNamespace) First(n int, v any) any {
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array {
+		return v
+	}
+	if n > rv.Len() {
+		n = rv.Len()
+	}
+	out := make([]any, n)
+	for i := 0; i < n; i++ {
+		out[i] = rv.Index(i).Interface()
+	}
+	return out
+}
+
+func (cn *collectionsNamespace) IsSet(obj any, key string) bool {
+	if obj == nil {
+		return false
+	}
+	rv := reflect.ValueOf(obj)
+	switch rv.Kind() {
+	case reflect.Map:
+		return rv.MapIndex(reflect.ValueOf(key)).IsValid()
+	case reflect.Slice, reflect.Array:
+		i := 0
+		fmt.Sscanf(key, "%d", &i)
+		return i >= 0 && i < rv.Len()
+	case reflect.Pointer, reflect.Interface:
+		if rv.IsNil() {
+			return false
+		}
+		return cn.IsSet(rv.Elem().Interface(), key)
+	}
+	return false
+}
+
+func (cn *collectionsNamespace) Delimit(v any, delim string, last ...string) string {
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array {
+		return fmt.Sprintf("%v", v)
+	}
+	parts := make([]string, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		parts[i] = fmt.Sprintf("%v", rv.Index(i).Interface())
+	}
+	if len(last) > 0 && len(parts) > 1 {
+		return strings.Join(parts[:len(parts)-1], delim) + last[0] + parts[len(parts)-1]
+	}
+	return strings.Join(parts, delim)
+}
+
+// mathNamespace implements Hugo's `math` namespace.
+type mathNamespace struct{}
+
+func (mn *mathNamespace) Add(a, b any) any {
+	fa, oka := toFloat(a)
+	fb, okb := toFloat(b)
+	if oka && okb {
+		result := fa + fb
+		if result == float64(int64(result)) {
+			return int(result)
+		}
+		return result
+	}
+	return 0
+}
+
+func (mn *mathNamespace) Sub(a, b any) any {
+	fa, oka := toFloat(a)
+	fb, okb := toFloat(b)
+	if oka && okb {
+		result := fa - fb
+		if result == float64(int64(result)) {
+			return int(result)
+		}
+		return result
+	}
+	return 0
+}
+
+func (mn *mathNamespace) Mul(a, b any) any {
+	fa, oka := toFloat(a)
+	fb, okb := toFloat(b)
+	if oka && okb {
+		result := fa * fb
+		if result == float64(int64(result)) {
+			return int(result)
+		}
+		return result
+	}
+	return 0
+}
+
+func (mn *mathNamespace) Div(a, b any) any {
+	fa, oka := toFloat(a)
+	fb, okb := toFloat(b)
+	if oka && okb && fb != 0 {
+		result := fa / fb
+		if result == float64(int64(result)) {
+			return int(result)
+		}
+		return result
+	}
+	return 0
+}
+
+func (mn *mathNamespace) Mod(a, b any) int {
+	fa, oka := toFloat(a)
+	fb, okb := toFloat(b)
+	if oka && okb && fb != 0 {
+		return int(fa) % int(fb)
+	}
+	return 0
+}
+
+func (mn *mathNamespace) Ceil(v any) float64 {
+	f, ok := toFloat(v)
+	if !ok {
+		return 0
+	}
+	return math.Ceil(f)
+}
+
+func (mn *mathNamespace) Floor(v any) float64 {
+	f, ok := toFloat(v)
+	if !ok {
+		return 0
+	}
+	return math.Floor(f)
+}
+
+func (mn *mathNamespace) Round(v any) float64 {
+	f, ok := toFloat(v)
+	if !ok {
+		return 0
+	}
+	return math.Round(f)
+}
+
+func (mn *mathNamespace) Abs(v any) float64 {
+	f, ok := toFloat(v)
+	if !ok {
+		return 0
+	}
+	return math.Abs(f)
+}
+
+func (mn *mathNamespace) Log(v any) float64 {
+	f, ok := toFloat(v)
+	if !ok {
+		return 0
+	}
+	return math.Log(f)
+}
+
+func (mn *mathNamespace) Sqrt(v any) float64 {
+	f, ok := toFloat(v)
+	if !ok {
+		return 0
+	}
+	return math.Sqrt(f)
+}
+
+func (mn *mathNamespace) Max(a, b any) any {
+	fa, oka := toFloat(a)
+	fb, okb := toFloat(b)
+	if oka && okb {
+		if fa > fb {
+			return a
+		}
+		return b
+	}
+	return a
+}
+
+func (mn *mathNamespace) Min(a, b any) any {
+	fa, oka := toFloat(a)
+	fb, okb := toFloat(b)
+	if oka && okb {
+		if fa < fb {
+			return a
+		}
+		return b
+	}
+	return a
+}
+
+// compareNamespace implements Hugo's `compare` namespace.
+type compareNamespace struct{}
+
+func (cn *compareNamespace) Default(dflt, val any) any {
+	if isZero(val) {
+		return dflt
+	}
+	return val
+}
+
+func (cn *compareNamespace) Eq(a, b any) bool {
+	return reflect.DeepEqual(a, b)
+}
+
+func (cn *compareNamespace) Ne(a, b any) bool {
+	return !reflect.DeepEqual(a, b)
+}
+
+func toFloat(v any) (float64, bool) {
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return float64(rv.Int()), true
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return float64(rv.Uint()), true
+	case reflect.Float32, reflect.Float64:
+		return rv.Float(), true
+	}
+	return 0, false
+}
+
+func (cn *compareNamespace) Ge(a, b any) bool {
+	fa, oka := toFloat(a)
+	fb, okb := toFloat(b)
+	if oka && okb {
+		return fa >= fb
+	}
+	return fmt.Sprintf("%v", a) >= fmt.Sprintf("%v", b)
+}
+
+func (cn *compareNamespace) Gt(a, b any) bool {
+	fa, oka := toFloat(a)
+	fb, okb := toFloat(b)
+	if oka && okb {
+		return fa > fb
+	}
+	return fmt.Sprintf("%v", a) > fmt.Sprintf("%v", b)
+}
+
+func (cn *compareNamespace) Le(a, b any) bool {
+	fa, oka := toFloat(a)
+	fb, okb := toFloat(b)
+	if oka && okb {
+		return fa <= fb
+	}
+	return fmt.Sprintf("%v", a) <= fmt.Sprintf("%v", b)
+}
+
+func (cn *compareNamespace) Lt(a, b any) bool {
+	fa, oka := toFloat(a)
+	fb, okb := toFloat(b)
+	if oka && okb {
+		return fa < fb
+	}
+	return fmt.Sprintf("%v", a) < fmt.Sprintf("%v", b)
+}
+
+// cssNamespace implements Hugo's `css` namespace (stub).
+type cssNamespace struct{}
+
+func (cn *cssNamespace) Build(opts ...any) *stubResource { return &stubResource{} }
+func (cn *cssNamespace) Sass(opts ...any) *stubResource  { return &stubResource{} }
+
+// jsNamespace implements Hugo's `js` namespace (stub).
+type jsNamespace struct{}
+
+func (jn *jsNamespace) Build(opts ...any) *stubResource { return &stubResource{} }
+
+// imagesNamespace implements Hugo's `images` namespace (stub).
+type imagesNamespace struct{}
+
+func (in *imagesNamespace) Filter(args ...any) *stubResource { return &stubResource{} }
+func (in *imagesNamespace) Resize(args ...any) *stubResource { return &stubResource{} }
+func (in *imagesNamespace) Fit(args ...any) *stubResource    { return &stubResource{} }
+func (in *imagesNamespace) Fill(args ...any) *stubResource   { return &stubResource{} }
+func (in *imagesNamespace) Crop(args ...any) *stubResource   { return &stubResource{} }
+func (in *imagesNamespace) Config(path string) any           { return nil }
+
+// fmtNamespace implements Hugo's `fmt` namespace.
+type fmtNamespace struct{}
+
+func (fn *fmtNamespace) Print(args ...any) string  { return fmt.Sprint(args...) }
+func (fn *fmtNamespace) Printf(format string, args ...any) string {
+	return fmt.Sprintf(format, args...)
+}
+func (fn *fmtNamespace) Println(args ...any) string { return fmt.Sprintln(args...) }
+func (fn *fmtNamespace) Warnf(format string, args ...any) string {
+	// log but return empty (Hugo .Warnf logs to stderr and returns empty)
+	return ""
+}
+func (fn *fmtNamespace) Errorf(format string, args ...any) string { return "" }
+
+// langNamespace implements Hugo's `lang` namespace.
+type langNamespace struct{ r *Renderer }
+
+func (ln *langNamespace) Translate(key string, args ...any) string {
+	return ln.r.i18nLookup(key)
+}
+func (ln *langNamespace) FormatNumber(precision int, number any) string {
+	f, _ := toFloat(number)
+	return fmt.Sprintf("%.*f", precision, f)
+}
+func (ln *langNamespace) FormatNumberCustom(precision int, number any, args ...string) string {
+	f, _ := toFloat(number)
+	return fmt.Sprintf("%.*f", precision, f)
+}
+func (ln *langNamespace) FormatPercent(precision int, number any) string {
+	f, _ := toFloat(number)
+	return fmt.Sprintf("%.*f%%", precision, f)
+}
+func (ln *langNamespace) FormatCurrency(precision int, currency string, number any) string {
+	f, _ := toFloat(number)
+	return fmt.Sprintf("%s %.*f", currency, precision, f)
+}
+
+// partialsNamespace implements Hugo's `partials` namespace.
+type partialsNamespace struct {
+	r *Renderer
+}
+
+func (pn *partialsNamespace) Include(name string, ctx ...any) (template.HTML, error) {
+	var c any
+	if len(ctx) > 0 {
+		c = ctx[0]
+	}
+	return pn.r.renderPartial(name, c)
+}
+
+func (pn *partialsNamespace) IncludeCached(name string, ctx any, keys ...any) (template.HTML, error) {
+	return pn.r.renderPartial(name, ctx)
+}
+
+// safeNamespace implements Hugo's `safe` namespace.
+type safeNamespace struct{}
+
+func (sn *safeNamespace) HTML(v any) template.HTML {
+	if v == nil {
+		return ""
+	}
+	if h, ok := v.(template.HTML); ok {
+		return h
+	}
+	return template.HTML(fmt.Sprintf("%v", v))
+}
+
+func (sn *safeNamespace) CSS(v any) template.CSS {
+	if v == nil {
+		return ""
+	}
+	return template.CSS(fmt.Sprintf("%v", v))
+}
+
+func (sn *safeNamespace) URL(v any) template.URL {
+	if v == nil {
+		return ""
+	}
+	return template.URL(fmt.Sprintf("%v", v))
+}
+
+func (sn *safeNamespace) JS(v any) template.JS {
+	if v == nil {
+		return ""
+	}
+	return template.JS(fmt.Sprintf("%v", v))
+}
+
+func (sn *safeNamespace) HTMLAttr(v any) template.HTMLAttr {
+	if v == nil {
+		return ""
+	}
+	return template.HTMLAttr(fmt.Sprintf("%v", v))
+}
+
+// stringsNamespace implements Hugo's `strings` namespace.
+type stringsNamespace struct{}
+
+func (sn *stringsNamespace) Contains(s, substr string) bool        { return strings.Contains(s, substr) }
+func (sn *stringsNamespace) ContainsAny(s, chars string) bool      { return strings.ContainsAny(s, chars) }
+func (sn *stringsNamespace) HasPrefix(s, prefix string) bool       { return strings.HasPrefix(s, prefix) }
+func (sn *stringsNamespace) HasSuffix(s, suffix string) bool       { return strings.HasSuffix(s, suffix) }
+func (sn *stringsNamespace) TrimPrefix(s, prefix string) string    { return strings.TrimPrefix(s, prefix) }
+func (sn *stringsNamespace) TrimSuffix(s, suffix string) string    { return strings.TrimSuffix(s, suffix) }
+func (sn *stringsNamespace) TrimSpace(s string) string             { return strings.TrimSpace(s) }
+func (sn *stringsNamespace) Trim(s, cutset string) string          { return strings.Trim(s, cutset) }
+func (sn *stringsNamespace) ToLower(s string) string               { return strings.ToLower(s) }
+func (sn *stringsNamespace) ToUpper(s string) string               { return strings.ToUpper(s) }
+func (sn *stringsNamespace) Title(s string) string                 { return titleCase(s) }
+func (sn *stringsNamespace) Count(s, substr string) int            { return strings.Count(s, substr) }
+func (sn *stringsNamespace) Replace(s, old, new string) string     { return strings.ReplaceAll(s, old, new) }
+func (sn *stringsNamespace) ReplaceRE(pattern, repl, s string) string {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return s
+	}
+	return re.ReplaceAllString(s, repl)
+}
+func (sn *stringsNamespace) Split(s, sep string) []string  { return strings.Split(s, sep) }
+func (sn *stringsNamespace) Join(elems []string, sep string) string { return strings.Join(elems, sep) }
+func (sn *stringsNamespace) Repeat(s string, count int) string { return strings.Repeat(s, count) }
+func (sn *stringsNamespace) Index(s, substr string) int { return strings.Index(s, substr) }
+func (sn *stringsNamespace) Truncate(n int, s string) string {
+	return truncateWords(n, s)
+}
+func (sn *stringsNamespace) Chomp(s string) string { return strings.TrimRight(s, "\n\r") }
+func (sn *stringsNamespace) Substr(s string, start int, length ...int) string {
+	runes := []rune(s)
+	if start < 0 {
+		start = len(runes) + start
+	}
+	if start >= len(runes) {
+		return ""
+	}
+	end := len(runes)
+	if len(length) > 0 && length[0] >= 0 {
+		end = start + length[0]
+		if end > len(runes) {
+			end = len(runes)
+		}
+	}
+	return string(runes[start:end])
+}
+func (sn *stringsNamespace) FindRE(pattern, s string, n ...int) []string {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil
+	}
+	limit := -1
+	if len(n) > 0 {
+		limit = n[0]
+	}
+	return re.FindAllString(s, limit)
+}
+
+// transformNamespace implements Hugo's `transform` namespace.
+type transformNamespace struct{}
+
+func (tn *transformNamespace) Plainify(v any) string {
+	if v == nil {
+		return ""
+	}
+	s := fmt.Sprintf("%v", v)
+	return strings.TrimSpace(regexp.MustCompile(`<[^>]*>`).ReplaceAllString(s, ""))
+}
+
+func (tn *transformNamespace) HTMLEscape(v any) string {
+	if v == nil {
+		return ""
+	}
+	return template.HTMLEscapeString(fmt.Sprintf("%v", v))
+}
+
+func (tn *transformNamespace) Markdownify(v any) template.HTML {
+	if v == nil {
+		return ""
+	}
+	return markdownifyString(fmt.Sprintf("%v", v))
+}
+
+func (tn *transformNamespace) Unmarshal(v any) any {
+	if v == nil {
+		return nil
+	}
+	var out any
+	s := fmt.Sprintf("%v", v)
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		return nil
+	}
+	return out
+}
 
 // i18nLookup returns the i18n translation for a key, or the key itself if not found.
 func (r *Renderer) i18nLookup(key string) string {
@@ -1763,22 +2773,33 @@ func (r *Renderer) getTemplateFor(kind, pageType, layout, section, lang string) 
 		}
 	}
 
-	// Compose: baseof + breadcrumb + kindTmpl + liveReloadBlock
-	combined := baseof + "\n" +
-		breadcrumb + "\n" +
-		kindTmpl + "\n" +
-		liveReloadBlock
-
-	t, err := template.New("baseof").Funcs(r.funcMap).Parse(combined)
+	// Parse each template piece separately into the same set.
+	// This avoids "multiple definition" errors when both baseof uses {{block "X"}}
+	// and kind templates use {{define "X"}} to override it — concatenation triggers
+	// a duplicate error, but separate Parse calls allow override.
+	t, err := template.New("baseof").Funcs(r.funcMap).Parse(baseof)
 	if err != nil {
-		return nil, fmt.Errorf("parse template %q: %w", kind, err)
+		return nil, fmt.Errorf("parse template %q baseof: %w", kind, err)
 	}
 
-	// Register Hugo _internal/ templates into the set so themes can call
-	// {{ template "_internal/opengraph.html" . }} etc.
+	// breadcrumb defines {{define "breadcrumb"}} — add it to the set.
+	if _, err2 := t.Parse(breadcrumb); err2 != nil {
+		_ = err2
+	}
+
+	// liveReloadBlock defines {{define "page-live-reload"}} — add it to the set.
+	if _, err2 := t.Parse(liveReloadBlock); err2 != nil {
+		_ = err2
+	}
+
+	// kind template — its {{define}} blocks override baseof's {{block}} defaults.
+	if _, err2 := t.Parse(kindTmpl); err2 != nil {
+		return nil, fmt.Errorf("parse template %q kind: %w", kind, err2)
+	}
+
+	// Register Hugo _internal/ templates into the set.
 	for name, tmplContent := range internalTemplates {
 		if _, err2 := t.New(name).Parse(tmplContent); err2 != nil {
-			// non-fatal: skip broken internal template
 			_ = err2
 		}
 	}

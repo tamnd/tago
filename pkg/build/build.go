@@ -348,6 +348,8 @@ func Build(cfg *Config) (*Stats, error) {
 			LanguageCode:      lang,
 			LanguageName:      lang,
 			LanguageDirection: "ltr",
+			Direction:         "ltr",
+			Locale:            lang,
 		},
 	}
 
