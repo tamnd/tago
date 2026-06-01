@@ -216,6 +216,9 @@ func (p *Page) RegularPages() []*Page {
 	return out
 }
 
+// Paginator returns nil (stub for Hugo .Paginator on content.Page — not available outside TemplateData context).
+func (p *Page) Paginator() any { return nil }
+
 // Sections returns only Kind=="section" children.
 func (p *Page) Sections() []*Page {
 	var out []*Page

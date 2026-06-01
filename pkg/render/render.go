@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html/template"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -177,7 +178,7 @@ func (hp *HugoPage) ReadingTime() int {
 }
 
 // Resources returns an empty page resources stub.
-func (hp *HugoPage) Resources() *pageResourcesStub { return &pageResourcesStub{} }
+func (hp *HugoPage) Resources() stubResourceSlice { return nil }
 
 // File returns a stub file info object.
 func (hp *HugoPage) File() *pageFileStub {
@@ -335,6 +336,10 @@ func (hp *HugoPage) FuzzyWordCount() int {
 
 // Truncated returns whether the page content was truncated for summary.
 func (hp *HugoPage) Truncated() bool { return false }
+func (hp *HugoPage) RawContent() string { return hp.Page.ContentPlain }
+func (hp *HugoPage) HasShortcode(name string) bool { return false }
+func (hp *HugoPage) GetPage(args ...any) *HugoPage { return nil }
+func (hp *HugoPage) Keywords() []string { return hp.Page.Tags }
 
 // PageData mirrors Hugo's .Data field on taxonomy/term pages (provides .Pages and .Terms).
 type PageData struct {
@@ -359,7 +364,7 @@ func (td *TermsData) Alphabetical() []TermEntry {
 	})
 	entries := make([]TermEntry, len(sorted))
 	for i, t := range sorted {
-		entries[i] = TermEntry{Name: t.Name, Count: t.Count}
+		entries[i] = TermEntry{Name: t.Name, Count: t.Count, Term: t.Name}
 	}
 	return entries
 }
@@ -373,7 +378,7 @@ func (td *TermsData) ByCount() []TermEntry {
 	})
 	entries := make([]TermEntry, len(sorted))
 	for i, t := range sorted {
-		entries[i] = TermEntry{Name: t.Name, Count: t.Count}
+		entries[i] = TermEntry{Name: t.Name, Count: t.Count, Term: t.Name}
 	}
 	return entries
 }
@@ -382,9 +387,36 @@ func (td *TermsData) ByCount() []TermEntry {
 type TermEntry struct {
 	Name  string
 	Count int
+	Term  string // alias for Name, used by some themes as .Term
 }
 
+func (t TermEntry) Page() *content.Page { return nil }
+func (t TermEntry) Pages() HugoPageList  { return nil }
+
 // HugoPageList wraps []*HugoPage with Hugo-compatible methods.
+// hugoSlice is a generic slice used by the slice/append template functions.
+// It mirrors the methods Hugo exposes on page collections so themes can call
+// .Reverse, .First, .Last, etc. on the result of slice/append operations.
+type hugoSlice []any
+
+func (s hugoSlice) Reverse() hugoSlice {
+	n := len(s)
+	out := make(hugoSlice, n)
+	for i, v := range s {
+		out[n-1-i] = v
+	}
+	return out
+}
+func (s hugoSlice) Len() int         { return len(s) }
+func (s hugoSlice) First(n int) hugoSlice {
+	if n > len(s) { n = len(s) }
+	return s[:n]
+}
+func (s hugoSlice) Last(n int) hugoSlice {
+	if n > len(s) { n = len(s) }
+	return s[len(s)-n:]
+}
+
 type HugoPageList []*HugoPage
 
 // GroupByDate groups pages by a date format string, returning [{Key, Pages}] sorted descending.
@@ -460,6 +492,28 @@ func (pl HugoPageList) Last(n int) HugoPageList {
 }
 
 func (pl HugoPageList) Len() int { return len(pl) }
+
+// Related returns empty list (stub for Hugo .Site.RegularPages.Related — requires index config).
+func (pl HugoPageList) Related(page any) HugoPageList { return nil }
+
+// GroupByPublishDate groups pages by publish date.
+func (pl HugoPageList) GroupByPublishDate(layout string) []HugoPageGroup {
+	return pl.GroupByDate(layout)
+}
+
+// GroupByLastmod groups pages by lastmod date.
+func (pl HugoPageList) GroupByLastmod(layout string) []HugoPageGroup {
+	return pl.GroupByDate(layout)
+}
+
+// GroupByParam groups pages by a param key.
+func (pl HugoPageList) GroupByParam(key string) []HugoPageGroup { return nil }
+
+// Filter returns pages matching the predicate (stub — returns all pages).
+func (pl HugoPageList) Filter(fn any) HugoPageList { return pl }
+
+// Limit returns the first n pages (alias for First).
+func (pl HugoPageList) Limit(n int) HugoPageList { return pl.First(n) }
 
 // HugoPageGroup is a group of pages with a common key (e.g. year).
 type HugoPageGroup struct {
@@ -566,8 +620,13 @@ func (s *SiteData) RSSLink() string {
 	return strings.TrimRight(s.BaseURL, "/") + "/index.xml"
 }
 
-// Data returns empty map (stub for .Site.Data).
-func (s *SiteData) Data() map[string]any { return nil }
+// Data returns the site data directory contents (or an empty safe map if not loaded).
+func (s *SiteData) Data() safeDataMap {
+	return safeDataMap{}
+}
+
+// safeDataMap is a map[string]any alias used for .Site.Data; returns empty self for missing keys.
+type safeDataMap map[string]any
 
 // Taxonomies returns empty map (stub for .Site.Taxonomies).
 func (s *SiteData) Taxonomies() map[string]any { return nil }
@@ -610,6 +669,13 @@ func (h *siteHomeStub) RegularPages() HugoPageList { return nil }
 func (h *siteHomeStub) Sections() HugoPageList     { return nil }
 func (h *siteHomeStub) Weight() int                { return 0 }
 func (h *siteHomeStub) Draft() bool                { return false }
+func (h *siteHomeStub) Resources() stubResourceSlice { return nil }
+func (h *siteHomeStub) Page() *siteHomeStub          { return h }
+func (h *siteHomeStub) GetPage(args ...any) *siteHomeStub { return nil }
+func (h *siteHomeStub) Paginator(args ...any) *paginatorStub { return &paginatorStub{} }
+func (h *siteHomeStub) GitInfo() any { return nil }
+func (h *siteHomeStub) HasShortcode(name string) bool { return false }
+func (h *siteHomeStub) Scratch() *Scratch { return newScratch() }
 
 // homeFileStub represents Hugo's content.File for the home page (virtual, so nil is returned).
 type homeFileStub struct{}
@@ -634,6 +700,9 @@ func (s *SiteData) Param(key string) any {
 	}
 	return nil
 }
+
+// LanguagePrefix returns an empty string (tago is single-language).
+func (s *SiteData) LanguagePrefix() string { return "" }
 
 // AssetRefs holds fingerprinted asset URLs.
 type AssetRefs struct {
@@ -962,11 +1031,56 @@ func (d *TemplateData) FuzzyWordCount() int {
 	return d.Page.FuzzyWordCount()
 }
 
-func (d *TemplateData) Parent() *content.Page {
-	if d.Page == nil {
-		return nil
+func (d *TemplateData) Parent() *safePageRef {
+	if d.Page == nil || d.Page.Parent == nil {
+		return &safePageRef{}
 	}
-	return d.Page.Parent
+	return &safePageRef{page: d.Page.Parent}
+}
+
+// safePageRef wraps *content.Page with nil-safe method access.
+// Prevents "nil pointer evaluating *content.Page.Field" in templates.
+type safePageRef struct{ page *content.Page }
+
+func (r *safePageRef) RelPermalink() string {
+	if r == nil || r.page == nil { return "" }
+	return r.page.RelPermalink
+}
+func (r *safePageRef) Permalink() string {
+	if r == nil || r.page == nil { return "" }
+	return r.page.Permalink
+}
+func (r *safePageRef) Title() string {
+	if r == nil || r.page == nil { return "" }
+	return r.page.Title
+}
+func (r *safePageRef) Kind() string {
+	if r == nil || r.page == nil { return "" }
+	return r.page.Kind
+}
+func (r *safePageRef) IsHome() bool {
+	if r == nil || r.page == nil { return false }
+	return r.page.Kind == "home"
+}
+func (r *safePageRef) IsSection() bool {
+	if r == nil || r.page == nil { return false }
+	return r.page.Kind == "section"
+}
+func (r *safePageRef) Layout() string {
+	if r == nil || r.page == nil { return "" }
+	return r.page.Layout
+}
+func (r *safePageRef) Type() string {
+	if r == nil || r.page == nil { return "" }
+	return r.page.Type
+}
+func (r *safePageRef) Params() map[string]any {
+	if r == nil || r.page == nil { return map[string]any{} }
+	return r.page.Params
+}
+func (r *safePageRef) Description() string {
+	if r == nil || r.page == nil { return "" }
+	return r.page.Description
 }
 
 // PageList is a slice of pages with Hugo-compatible methods.
@@ -1077,9 +1191,7 @@ func (d *TemplateData) GitInfo() any {
 }
 
 // Resources returns an empty page resources stub (stub for Hugo .Resources).
-func (d *TemplateData) Resources() *pageResourcesStub {
-	return &pageResourcesStub{}
-}
+func (d *TemplateData) Resources() stubResourceSlice { return nil }
 
 // IsTranslated returns false (stub for multilingual support).
 func (d *TemplateData) IsTranslated() bool { return false }
@@ -1168,6 +1280,13 @@ func (p *paginatorStub) URL() string               { return "" }
 func (p *paginatorStub) RelPermalink() string      { return "" }
 func (p *paginatorStub) Permalink() string         { return "" }
 func (p *paginatorStub) PageSize() int             { return 10 }
+func (p *paginatorStub) PageGroups() []pageGroup   { return nil }
+
+// pageGroup represents a group of pages (e.g., grouped by date).
+type pageGroup struct {
+	Key   any
+	Pages HugoPageList
+}
 
 // File returns a stub file info object (stub for Hugo .File).
 func (d *TemplateData) File() *pageFileStub {
@@ -1222,6 +1341,23 @@ func (d *TemplateData) RegularPagesRecursive() HugoPageList {
 	}
 	return nil
 }
+
+// Keywords returns the page's tags/keywords for use in meta tags.
+func (d *TemplateData) Keywords() []string {
+	if d.Page == nil {
+		return nil
+	}
+	if len(d.Page.Tags) > 0 {
+		return d.Page.Tags
+	}
+	return nil
+}
+
+// GetPage returns a stub (tago does not resolve cross-page references at template time).
+func (d *TemplateData) GetPage(args ...any) *TemplateData { return nil }
+
+// HasShortcode returns false (stub for Hugo .HasShortcode check).
+func (d *TemplateData) HasShortcode(name string) bool { return false }
 
 // Renderer handles template rendering.
 type Renderer struct {
@@ -1622,7 +1758,16 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 			}
 			return template.JS(fmt.Sprintf("%v", v))
 		},
-		"formatDate": func(t time.Time) string {
+		"formatDate": func(v any) string {
+			var t time.Time
+			switch x := v.(type) {
+			case time.Time:
+				t = x
+			case HugoTime:
+				t = x.Time
+			default:
+				return ""
+			}
 			if t.IsZero() {
 				return ""
 			}
@@ -1663,9 +1808,36 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 			}
 			return template.URL(fmt.Sprintf("%v", v))
 		},
-		"add": func(a, b int) int { return a + b },
-		"sub": func(a, b int) int { return a - b },
-		"mul": func(a, b int) int { return a * b },
+		"add": func(a, b any) any {
+			ai, aok := toInt(a)
+			bi, bok := toInt(b)
+			if aok && bok {
+				return ai + bi
+			}
+			af := toFloat64(a)
+			bf := toFloat64(b)
+			return af + bf
+		},
+		"sub": func(a, b any) any {
+			ai, aok := toInt(a)
+			bi, bok := toInt(b)
+			if aok && bok {
+				return ai - bi
+			}
+			af := toFloat64(a)
+			bf := toFloat64(b)
+			return af - bf
+		},
+		"mul": func(a, b any) any {
+			ai, aok := toInt(a)
+			bi, bok := toInt(b)
+			if aok && bok {
+				return ai * bi
+			}
+			af := toFloat64(a)
+			bf := toFloat64(b)
+			return af * bf
+		},
 		"dict": func(pairs ...any) map[string]any {
 			m := make(map[string]any)
 			for i := 0; i+1 < len(pairs); i += 2 {
@@ -1747,8 +1919,8 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 			}
 			return template.CSS(fmt.Sprintf("%v", v))
 		},
-		"markdownify": func(s string) template.HTML {
-			return markdownifyString(s)
+		"markdownify": func(s any) template.HTML {
+			return markdownifyString(anyToStr(s))
 		},
 		"emojify": func(s any) string {
 			if s == nil {
@@ -1765,8 +1937,8 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 		"trimRight":  func(v any, cutset string) string { return strings.TrimRight(anyToStr(v), cutset) },
 		"trimPrefix": func(v any, prefix string) string { return strings.TrimPrefix(anyToStr(v), prefix) },
 		"trimSuffix": func(v any, suffix string) string { return strings.TrimSuffix(anyToStr(v), suffix) },
-		"replace": func(s, old, newStr string) string {
-			return strings.ReplaceAll(s, old, newStr)
+		"replace": func(s, old, newStr any) string {
+			return strings.ReplaceAll(anyToStr(s), anyToStr(old), anyToStr(newStr))
 		},
 		"findRE": func(pattern string, v any, args ...any) []string {
 			s := fmt.Sprintf("%v", v)
@@ -1855,6 +2027,35 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 			}
 			return string(runes[st:])
 		},
+		// slicestr(s, start[, end]) — alias for substr/string slicing (Hugo legacy)
+		"slicestr": func(s any, start any, args ...any) string {
+			str := anyToStr(s)
+			runes := []rune(str)
+			n := len(runes)
+			st, _ := toInt(start)
+			if st < 0 {
+				if st = n + st; st < 0 {
+					st = 0
+				}
+			}
+			if st > n {
+				return ""
+			}
+			if len(args) > 0 {
+				end, _ := toInt(args[0])
+				if end < 0 {
+					end = n + end
+				}
+				if end > n {
+					end = n
+				}
+				if end <= st {
+					return ""
+				}
+				return string(runes[st:end])
+			}
+			return string(runes[st:])
+		},
 		"fileExists": func(path string) bool {
 			_, err := os.Stat(path)
 			return err == nil
@@ -1877,7 +2078,13 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 		"stringsTrimSuffix": func(v, suffix any) string { return strings.TrimSuffix(anyToStr(v), anyToStr(suffix)) },
 
 		// printf alias
-		"printf": fmt.Sprintf,
+		"printf": func(format any, args ...any) string {
+			f := anyToStr(format)
+			if f == "" {
+				return ""
+			}
+			return fmt.Sprintf(f, args...)
+		},
 
 		// URL functions
 		"absURL": func(path any) string {
@@ -1940,24 +2147,29 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 			return ht
 		},
 
-		// Math
-		"div": func(a, b int) int {
-			if b == 0 {
-				return 0
+		// Math — accept any to handle nil params gracefully
+		"div": func(a, b any) any {
+			ai, aok := toInt(a)
+			bi, bok := toInt(b)
+			if aok && bok {
+				if bi == 0 { return 0 }
+				return ai / bi
 			}
-			return a / b
+			af, bf := toFloat64(a), toFloat64(b)
+			if bf == 0 { return 0.0 }
+			return af / bf
 		},
-		"mod": func(a, b int) int {
-			if b == 0 {
-				return 0
-			}
-			return a % b
+		"mod": func(a, b any) int {
+			ai, _ := toInt(a)
+			bi, _ := toInt(b)
+			if bi == 0 { return 0 }
+			return ai % bi
 		},
-		"modBool": func(a, b int) bool {
-			if b == 0 {
-				return false
-			}
-			return a%b == 0
+		"modBool": func(a, b any) bool {
+			ai, _ := toInt(a)
+			bi, _ := toInt(b)
+			if bi == 0 { return false }
+			return ai % bi == 0
 		},
 		// math functions — named without dots (Go template FuncMap identifiers must be valid Go identifiers)
 		// Hugo templates call these as {{ math.Ceil x }} using Hugo's namespace system;
@@ -2063,11 +2275,28 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 			}
 			return result
 		},
-		"append": func(v any, args ...any) []any {
-			return hugoAppend(v, args...)
+		"shuffle": func(collection any) any {
+			rv := reflect.ValueOf(collection)
+			if !rv.IsValid() || (rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array) {
+				return collection
+			}
+			n := rv.Len()
+			result := reflect.MakeSlice(rv.Type(), n, n)
+			reflect.Copy(result, rv)
+			// Fisher-Yates shuffle with hash-based pseudo-random (deterministic for SSG)
+			for i := n - 1; i > 0; i-- {
+				j := (i * 2654435761) % (i + 1)
+				a, b := result.Index(i).Interface(), result.Index(j).Interface()
+				result.Index(i).Set(reflect.ValueOf(b))
+				result.Index(j).Set(reflect.ValueOf(a))
+			}
+			return result.Interface()
 		},
-		"slice": func(items ...any) []any {
-			return items
+		"append": func(v any, args ...any) hugoSlice {
+			return hugoSlice(hugoAppend(v, args...))
+		},
+		"slice": func(items ...any) hugoSlice {
+			return hugoSlice(items)
 		},
 		"index": indexInto,
 		"isset": func(obj any, key string) bool {
@@ -2485,6 +2714,7 @@ func (s *stubResource) Height() int                              { return 0 }
 func (s *stubResource) Exif() map[string]any                     { return nil }
 func (s *stubResource) Colors() []string                         { return nil }
 func (s *stubResource) Process(spec string) *stubResource        { return s }
+func (s *stubResource) Publish() error                           { return nil }
 
 type stubMediaType struct{ mime string }
 func (m *stubMediaType) Type() string     { return m.mimeStr() }
@@ -2518,14 +2748,14 @@ func (d *stubResourceData) TransitionKey() string { return "" }
 // resourcesNamespace implements the `resources` template namespace.
 type resourcesNamespace struct{}
 
-func (rn *resourcesNamespace) Get(path string) *stubResource {
-	return &stubResource{path: path}
+func (rn *resourcesNamespace) Get(path any) *stubResource {
+	return nil // return nil so {{ with resources.Get "..." }} is falsy when resource not found
 }
-func (rn *resourcesNamespace) GetRemote(url string, opts ...any) *stubResource {
-	return &stubResource{path: url}
+func (rn *resourcesNamespace) GetRemote(url any, opts ...any) *stubResource {
+	return nil
 }
-func (rn *resourcesNamespace) FromString(name, content string) *stubResource {
-	return &stubResource{path: name}
+func (rn *resourcesNamespace) FromString(name, content any) *stubResource {
+	return &stubResource{path: anyToStr(name)}
 }
 func (rn *resourcesNamespace) ExecuteAsTemplate(name string, ctx any, r ...*stubResource) *stubResource {
 	if len(r) > 0 {
@@ -2539,11 +2769,11 @@ func (rn *resourcesNamespace) Concat(name string, resources ...any) *stubResourc
 func (rn *resourcesNamespace) Copy(name string, src *stubResource) *stubResource {
 	return &stubResource{path: name}
 }
-func (rn *resourcesNamespace) Match(pattern string) []*stubResource {
+func (rn *resourcesNamespace) Match(pattern any) []*stubResource {
 	return nil
 }
-func (rn *resourcesNamespace) GetMatch(pattern string) *stubResource {
-	return &stubResource{path: pattern}
+func (rn *resourcesNamespace) GetMatch(pattern any) *stubResource {
+	return nil // nil = falsy, so {{ with resources.GetMatch "..." }} skips block when not found
 }
 func (rn *resourcesNamespace) Minify(r ...any) *stubResource {
 	if len(r) > 0 {
@@ -2674,9 +2904,25 @@ func (pn *pathNamespace) Clean(p any) string        { return filepath.Clean(anyT
 // reflectNamespace implements the `reflect` template namespace.
 type reflectNamespace struct{}
 
-func (rn *reflectNamespace) IsMap(v any) bool    { return reflect.TypeOf(v).Kind() == reflect.Map }
-func (rn *reflectNamespace) IsSlice(v any) bool  { return reflect.TypeOf(v).Kind() == reflect.Slice }
-func (rn *reflectNamespace) IsString(v any) bool { _, ok := v.(string); return ok }
+func (rn *reflectNamespace) IsMap(v any) bool {
+	t := reflect.TypeOf(v)
+	return t != nil && t.Kind() == reflect.Map
+}
+func (rn *reflectNamespace) IsSlice(v any) bool {
+	t := reflect.TypeOf(v)
+	return t != nil && (t.Kind() == reflect.Slice || t.Kind() == reflect.Array)
+}
+func (rn *reflectNamespace) IsString(v any) bool    { _, ok := v.(string); return ok }
+func (rn *reflectNamespace) IsFloat(v any) bool {
+	t := reflect.TypeOf(v)
+	return t != nil && (t.Kind() == reflect.Float32 || t.Kind() == reflect.Float64)
+}
+func (rn *reflectNamespace) IsInt(v any) bool {
+	t := reflect.TypeOf(v)
+	return t != nil && (t.Kind() >= reflect.Int && t.Kind() <= reflect.Int64)
+}
+func (rn *reflectNamespace) IsBool(v any) bool    { _, ok := v.(bool); return ok }
+func (rn *reflectNamespace) IsInvalid(v any) bool { return v == nil }
 
 // Scratch implements Hugo's .Scratch / site.Store / .Page.Store mutable scratch pad.
 type Scratch struct {
@@ -2789,7 +3035,23 @@ type urlsNamespace struct {
 	baseURL string
 }
 
-func (un *urlsNamespace) Parse(rawurl string) any { return nil }
+func (un *urlsNamespace) Parse(rawurl any) *parsedURL {
+	s := anyToStr(rawurl)
+	u, err := url.Parse(s)
+	if err != nil {
+		return &parsedURL{}
+	}
+	return &parsedURL{Host: u.Host, Path: u.Path, Scheme: u.Scheme, RawQuery: u.RawQuery, Fragment: u.Fragment}
+}
+
+// parsedURL mirrors url.URL for template access.
+type parsedURL struct {
+	Host     string
+	Path     string
+	Scheme   string
+	RawQuery string
+	Fragment string
+}
 func (un *urlsNamespace) AbsURL(path string) string {
 	base := strings.TrimRight(un.baseURL, "/")
 	if !strings.HasPrefix(path, "/") {
@@ -3418,10 +3680,13 @@ func (sn *stringsNamespace) Contains(s, substr any) bool    { return strings.Con
 func (sn *stringsNamespace) ContainsAny(s, chars any) bool  { return strings.ContainsAny(anyToStr(s), anyToStr(chars)) }
 func (sn *stringsNamespace) HasPrefix(s, prefix any) bool   { return strings.HasPrefix(anyToStr(s), anyToStr(prefix)) }
 func (sn *stringsNamespace) HasSuffix(s, suffix any) bool   { return strings.HasSuffix(anyToStr(s), anyToStr(suffix)) }
-func (sn *stringsNamespace) TrimPrefix(s, prefix any) string { return strings.TrimPrefix(anyToStr(s), anyToStr(prefix)) }
-func (sn *stringsNamespace) TrimSuffix(s, suffix any) string { return strings.TrimSuffix(anyToStr(s), anyToStr(suffix)) }
-func (sn *stringsNamespace) TrimSpace(s any) string         { return strings.TrimSpace(anyToStr(s)) }
-func (sn *stringsNamespace) Trim(s, cutset any) string      { return strings.Trim(anyToStr(s), anyToStr(cutset)) }
+func (sn *stringsNamespace) TrimPrefix(s, prefix any) string    { return strings.TrimPrefix(anyToStr(s), anyToStr(prefix)) }
+func (sn *stringsNamespace) TrimSuffix(s, suffix any) string    { return strings.TrimSuffix(anyToStr(s), anyToStr(suffix)) }
+func (sn *stringsNamespace) TrimSpace(s any) string             { return strings.TrimSpace(anyToStr(s)) }
+func (sn *stringsNamespace) Trim(s, cutset any) string          { return strings.Trim(anyToStr(s), anyToStr(cutset)) }
+// Hugo arg order: (cutset, string) for pipeline: .RelPermalink | strings.TrimRight "/"
+func (sn *stringsNamespace) TrimLeft(cutset, s any) string      { return strings.TrimLeft(anyToStr(s), anyToStr(cutset)) }
+func (sn *stringsNamespace) TrimRight(cutset, s any) string     { return strings.TrimRight(anyToStr(s), anyToStr(cutset)) }
 func (sn *stringsNamespace) ToLower(s any) string           { return strings.ToLower(anyToStr(s)) }
 func (sn *stringsNamespace) ToUpper(s any) string           { return strings.ToUpper(anyToStr(s)) }
 func (sn *stringsNamespace) Title(s any) string             { return titleCase(anyToStr(s)) }
@@ -3523,6 +3788,10 @@ func (r *Renderer) i18nLookup(key string) string {
 // partialReturnStore maps goroutine ID -> returned value for partial {{ return }}.
 var partialReturnStore sync.Map
 
+// currentTmplStore maps goroutine ID -> *template.Template (the currently executing partial's set).
+// Used so inline {{ define }} blocks are found when {{ partial "name" }} is called.
+var currentTmplStore sync.Map
+
 // goroutineID returns the current goroutine's numeric ID via runtime.Stack.
 func goroutineID() int64 {
 	var buf [32]byte
@@ -3618,6 +3887,28 @@ func (r *Renderer) renderPartialAny(name string, ctx any) (result any, err error
 			}
 		}
 		if partialContent == "" {
+			// Check if an inline {{ define "partials/name" }} exists in the current executing template set.
+			gid := goroutineID()
+			if ts, tsok := currentTmplStore.Load(gid); tsok {
+				tset := ts.(*template.Template)
+				baseName := strings.TrimSuffix(name, ".html")
+				for _, candidate := range []string{
+					"partials/" + baseName,
+					"partials/" + name,
+				} {
+					if t2 := tset.Lookup(candidate); t2 != nil {
+						var buf2 bytes.Buffer
+						execErr2 := t2.Execute(&buf2, ctx)
+						if val, ok2 := partialReturnStore.LoadAndDelete(gid); ok2 {
+							return val, nil
+						}
+						if execErr2 != nil {
+							return nil, fmt.Errorf("execute partial %q: %w", candidate, execErr2)
+						}
+						return template.HTML(buf2.String()), nil
+					}
+				}
+			}
 			// Silently return empty for missing partials (common for optional partials like comments)
 			return template.HTML(""), nil
 		}
@@ -3641,8 +3932,16 @@ func (r *Renderer) renderPartialAny(name string, ctx any) (result any, err error
 	}
 
 	gid := goroutineID()
+	// Store current template set so inline {{ define }} blocks are findable via partial calls.
+	prev, hadPrev := currentTmplStore.Load(gid)
+	currentTmplStore.Store(gid, t)
 	var buf bytes.Buffer
 	execErr := t.Execute(&buf, ctx)
+	if hadPrev {
+		currentTmplStore.Store(gid, prev)
+	} else {
+		currentTmplStore.Delete(gid)
+	}
 
 	// Check if {{ return }} was called; if so, use the stored value.
 	if val, ok := partialReturnStore.LoadAndDelete(gid); ok {

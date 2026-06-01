@@ -228,7 +228,7 @@ func TestFuncTruncate(t *testing.T) {
 func TestFuncMarkdownify(t *testing.T) {
 	r := makeRenderer(t)
 	fm := r.buildFuncMap()
-	mdFn := fm["markdownify"].(func(string) template.HTML)
+	mdFn := fm["markdownify"].(func(any) template.HTML)
 
 	result := mdFn("**bold** text")
 	if result == "" {
@@ -512,7 +512,7 @@ func TestFuncAppendPipeline(t *testing.T) {
 	// In Go templates, pipeline value is last arg: append($item, $slice)
 	r := makeRenderer(t)
 	fm := r.buildFuncMap()
-	appendFn := fm["append"].(func(any, ...any) []any)
+	appendFn := fm["append"].(func(any, ...any) hugoSlice)
 
 	base := []any{"ma0", "avenir", "bg-near-white"}
 	// pipeline: base | append "is-home" -> append("is-home", base)
