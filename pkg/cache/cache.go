@@ -35,7 +35,6 @@ CREATE TABLE IF NOT EXISTS page_cache (
     link_title     TEXT,
     kind           TEXT,
     content_plain  TEXT,
-    content_html   TEXT,
     file_size      INT DEFAULT 0,
     file_mtime     INT DEFAULT 0
 );
@@ -93,8 +92,10 @@ type Cache struct {
 var migrations = []string{
 	`ALTER TABLE page_cache ADD COLUMN file_size    INT DEFAULT 0`,
 	`ALTER TABLE page_cache ADD COLUMN file_mtime   INT DEFAULT 0`,
-	`ALTER TABLE page_cache ADD COLUMN content_html TEXT`,
 	`CREATE INDEX IF NOT EXISTS idx_page_cache_stat ON page_cache (file_path, file_size, file_mtime)`,
+	// content_html is no longer stored; drop the column from existing DBs.
+	// Ignored on new DBs (column doesn't exist) and after first run (already dropped).
+	`ALTER TABLE page_cache DROP COLUMN content_html`,
 }
 
 // Open opens or creates the cache database at the given path.
@@ -110,7 +111,15 @@ func Open(path string) (*Cache, error) {
 	for _, m := range migrations {
 		db.Exec(m) // ignore errors — column already exists is expected
 	}
-	return &Cache{db: db}, nil
+	c := &Cache{db: db}
+	// Run VACUUM once after dropping content_html to reclaim the freed space.
+	// Without VACUUM, SQLite keeps the 400 MB of freed pages in the file,
+	// causing slow reads on every subsequent build.
+	if v, _ := c.GetState("vacuumed_v7"); v == "" {
+		db.Exec(`VACUUM`)
+		c.SetState("vacuumed_v7", "1")
+	}
+	return c, nil
 }
 
 // Close closes the database.
@@ -156,14 +165,14 @@ func (c *Cache) LoadStatMap() (map[string]StatEntry, error) {
 	return result, rows.Err()
 }
 
-// LoadAll returns all cached page records.
+// LoadAll returns all cached page records without content_plain.
+// Call LoadPlainTexts separately when the search index needs to be rebuilt.
 func (c *Cache) LoadAll() ([]*PageRecord, error) {
 	rows, err := c.db.Query(`
 		SELECT file_path, file_hash, permalink, title, link_title, description,
 		       tags, date, section, lang, depth, word_count, summary, params,
 		       weight, no_index, exclude_search, type, draft, kind, built_at,
-		       COALESCE(content_plain, ''), COALESCE(reading_time, 0),
-		       COALESCE(content_html, '')
+		       COALESCE(reading_time, 0)
 		FROM page_cache
 	`)
 	if err != nil {
@@ -181,7 +190,7 @@ func (c *Cache) LoadAll() ([]*PageRecord, error) {
 			&r.Description, &tagsJSON, &dateStr, &r.Section, &r.Lang,
 			&r.Depth, &r.WordCount, &r.Summary, &paramsJSON,
 			&r.Weight, &noIndex, &excludeSearch, &r.Type, &draft, &r.Kind, &r.BuiltAt,
-			&r.ContentPlain, &r.ReadingTime, &r.ContentHTML,
+			&r.ReadingTime,
 		)
 		if err != nil {
 			return nil, err
@@ -210,8 +219,60 @@ func (c *Cache) LoadAll() ([]*PageRecord, error) {
 	return records, rows.Err()
 }
 
-// Save upserts a page record into the cache.
-func (c *Cache) Save(r *PageRecord) error {
+// LoadPlainTexts returns file_path → content_plain for all cached pages.
+// Called only when the search index needs rebuilding (contentChange = true).
+func (c *Cache) LoadPlainTexts() (map[string]string, error) {
+	rows, err := c.db.Query(`SELECT file_path, COALESCE(content_plain, '') FROM page_cache`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[string]string)
+	for rows.Next() {
+		var path, plain string
+		if err := rows.Scan(&path, &plain); err != nil {
+			return nil, err
+		}
+		result[path] = plain
+	}
+	return result, rows.Err()
+}
+
+const upsertSQL = `
+	INSERT INTO page_cache
+	    (file_path, file_hash, permalink, title, link_title, description,
+	     tags, date, section, lang, depth, word_count, reading_time, summary, params,
+	     weight, no_index, exclude_search, type, draft, kind, built_at, content_plain,
+	     file_size, file_mtime)
+	VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	ON CONFLICT(file_path) DO UPDATE SET
+	    file_hash=excluded.file_hash,
+	    permalink=excluded.permalink,
+	    title=excluded.title,
+	    link_title=excluded.link_title,
+	    description=excluded.description,
+	    tags=excluded.tags,
+	    date=excluded.date,
+	    section=excluded.section,
+	    lang=excluded.lang,
+	    depth=excluded.depth,
+	    word_count=excluded.word_count,
+	    reading_time=excluded.reading_time,
+	    summary=excluded.summary,
+	    params=excluded.params,
+	    weight=excluded.weight,
+	    no_index=excluded.no_index,
+	    exclude_search=excluded.exclude_search,
+	    type=excluded.type,
+	    draft=excluded.draft,
+	    kind=excluded.kind,
+	    built_at=excluded.built_at,
+	    content_plain=excluded.content_plain,
+	    file_size=excluded.file_size,
+	    file_mtime=excluded.file_mtime
+`
+
+func recordArgs(r *PageRecord, builtAt int64) []any {
 	tagsJSON := "[]"
 	if len(r.Tags) > 0 {
 		b, _ := json.Marshal(r.Tags)
@@ -226,60 +287,53 @@ func (c *Cache) Save(r *PageRecord) error {
 	if !r.Date.IsZero() {
 		dateStr = r.Date.Format(time.RFC3339)
 	}
-	noIndex := boolToInt(r.NoIndex)
-	excludeSearch := boolToInt(r.ExcludeSearch)
-	draft := boolToInt(r.Draft)
-	builtAt := time.Now().Unix()
-
-	_, err := c.db.Exec(`
-		INSERT INTO page_cache
-		    (file_path, file_hash, permalink, title, link_title, description,
-		     tags, date, section, lang, depth, word_count, reading_time, summary, params,
-		     weight, no_index, exclude_search, type, draft, kind, built_at, content_plain,
-		     content_html, file_size, file_mtime)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(file_path) DO UPDATE SET
-		    file_hash=excluded.file_hash,
-		    permalink=excluded.permalink,
-		    title=excluded.title,
-		    link_title=excluded.link_title,
-		    description=excluded.description,
-		    tags=excluded.tags,
-		    date=excluded.date,
-		    section=excluded.section,
-		    lang=excluded.lang,
-		    depth=excluded.depth,
-		    word_count=excluded.word_count,
-		    reading_time=excluded.reading_time,
-		    summary=excluded.summary,
-		    params=excluded.params,
-		    weight=excluded.weight,
-		    no_index=excluded.no_index,
-		    exclude_search=excluded.exclude_search,
-		    type=excluded.type,
-		    draft=excluded.draft,
-		    kind=excluded.kind,
-		    built_at=excluded.built_at,
-		    content_plain=excluded.content_plain,
-		    content_html=excluded.content_html,
-		    file_size=excluded.file_size,
-		    file_mtime=excluded.file_mtime
-	`,
+	return []any{
 		r.FilePath, r.FileHash, r.Permalink, r.Title, r.LinkTitle, r.Description,
 		tagsJSON, dateStr, r.Section, r.Lang,
 		r.Depth, r.WordCount, r.ReadingTime, r.Summary, paramsJSON,
-		r.Weight, noIndex, excludeSearch, r.Type, draft, r.Kind, builtAt, r.ContentPlain,
-		r.ContentHTML, r.FileSize, r.FileMtime,
-	)
+		r.Weight, boolToInt(r.NoIndex), boolToInt(r.ExcludeSearch), r.Type,
+		boolToInt(r.Draft), r.Kind, builtAt, r.ContentPlain,
+		r.FileSize, r.FileMtime,
+	}
+}
+
+// Save upserts a single page record into the cache.
+func (c *Cache) Save(r *PageRecord) error {
+	_, err := c.db.Exec(upsertSQL, recordArgs(r, time.Now().Unix())...)
 	return err
 }
 
-// ClearContentHTML sets content_html to NULL for all rows, forcing re-render
-// on the next build (used when the renderer version changes).
-func (c *Cache) ClearContentHTML() error {
-	_, err := c.db.Exec(`UPDATE page_cache SET content_html = NULL`)
-	return err
+// SaveBatch upserts all records in a single transaction — far faster than
+// calling Save() per page on large corpora.
+func (c *Cache) SaveBatch(records []*PageRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare(upsertSQL)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	builtAt := time.Now().Unix()
+	for _, r := range records {
+		if _, err := stmt.Exec(recordArgs(r, builtAt)...); err != nil {
+			stmt.Close()
+			tx.Rollback()
+			return err
+		}
+	}
+	stmt.Close()
+	return tx.Commit()
 }
+
+// ClearContentHTML is a no-op — content_html is no longer stored in the cache.
+// Pages that need re-rendering are detected via file hash changes and
+// the layoutChanged / renderVersion flags in build state.
+func (c *Cache) ClearContentHTML() error { return nil }
 
 // Delete removes a page record from the cache.
 func (c *Cache) Delete(filePath string) error {

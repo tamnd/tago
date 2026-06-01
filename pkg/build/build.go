@@ -45,8 +45,9 @@ type Stats struct {
 
 // renderVersion is bumped whenever the markdown renderer changes in a way that
 // alters HTML output (new extensions, link rewriting, etc.). On mismatch,
-// tago clears all cached content_html to force a full re-render.
-const renderVersion = "6"
+// tago forces a full re-render by setting layoutChanged=true, which causes
+// every page's output file to be re-rendered from its source file.
+const renderVersion = "7"
 
 // Build runs the full incremental build.
 func Build(cfg *Config) (*Stats, error) {
@@ -260,17 +261,13 @@ func Build(cfg *Config) (*Stats, error) {
 	}
 	chromaCSSURL := "/css/chroma.css"
 
-	// Detect pages that need re-rendering due to missing/empty ContentHTML:
-	// 1. Output file has an empty content div (page.html renders it, detectable)
-	// 2. Page has plain-text content in DB but no HTML (section pages use {{if .ContentHTML}},
-	//    so no empty div is emitted — check ContentPlain instead)
+	// Detect pages whose output file has an empty content div — this catches
+	// any stale output written before the content_html column was removed.
 	for _, p := range allPages {
 		if needsRender[p.FilePath] || p.OutputPath == "" {
 			continue
 		}
 		if outputHasEmptyContent(p.OutputPath) {
-			needsRender[p.FilePath] = true
-		} else if p.ContentPlain != "" && p.ContentHTML == "" {
 			needsRender[p.FilePath] = true
 		}
 	}
@@ -295,6 +292,7 @@ func Build(cfg *Config) (*Stats, error) {
 	renderer := render.New(site, rAssets, cfg.LayoutsDir, cfg.LiveReload)
 
 	pagesRebuilt := 0
+	var toSave []*cache.PageRecord
 
 	// Render pages that need updating
 	for _, page := range pageSlice {
@@ -302,11 +300,13 @@ func Build(cfg *Config) (*Stats, error) {
 		if !shouldRender {
 			continue
 		}
-		// If ContentHTML is missing (DB rows before content_html column was added),
-		// re-parse from disk so the render produces real output and the DB gets populated.
+		// ContentHTML is no longer cached in the DB; re-parse from disk for any
+		// page that needs rendering but wasn't in changedPages (e.g. ancestors
+		// re-rendered due to a child change, or layout-change forced re-renders).
 		if page.ContentHTML == "" && page.FilePath != "" {
 			if reparsed, rerr := content.ParseAndRender(page.FilePath); rerr == nil {
 				page.ContentHTML = reparsed.ContentHTML
+				page.ContentPlain = reparsed.ContentPlain
 			}
 		}
 		if err := renderer.RenderPage(page, pageSlice); err != nil {
@@ -315,13 +315,14 @@ func Build(cfg *Config) (*Stats, error) {
 		}
 		pagesRebuilt++
 
-		// Save to cache
 		if page.FilePath != "" {
-			rec := pageToRecord(page)
-			if err := cacheDB.Save(rec); err != nil {
-				log.Printf("tago: cache save error for %s: %v", page.FilePath, err)
-			}
+			toSave = append(toSave, pageToRecord(page))
 		}
+	}
+
+	// Flush all cache updates in a single transaction.
+	if err := cacheDB.SaveBatch(toSave); err != nil {
+		log.Printf("tago: cache batch save error: %v", err)
 	}
 
 	// Re-render tag pages if any changed page has tags
@@ -339,6 +340,19 @@ func Build(cfg *Config) (*Stats, error) {
 	// contentChange: any file changed (content or metadata) → search + sitemap.
 	contentChange := len(changedFiles) > 0 || len(deletedFiles) > 0 || layoutChanged
 	structuralChange := len(deletedFiles) > 0 || structurallyChanged(changedPages, cachedPageMap) || layoutChanged
+
+	// Populate ContentPlain for unchanged cached pages only when the search index
+	// needs rebuilding. LoadAll() omits content_plain (large) to keep the common
+	// incremental path fast; this lazy-loads it only on contentChange builds.
+	if contentChange {
+		if plainTexts, err := cacheDB.LoadPlainTexts(); err == nil {
+			for _, p := range pageSlice {
+				if p.ContentPlain == "" && p.FilePath != "" {
+					p.ContentPlain = plainTexts[p.FilePath]
+				}
+			}
+		}
+	}
 
 	type indexTask struct {
 		name string
