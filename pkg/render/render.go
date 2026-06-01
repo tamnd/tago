@@ -62,7 +62,9 @@ type SiteMenuItem struct {
 // Hugo themes do {{range .Pages}}...{{.Site.Params.x}}...{{end}} expecting .Site on each page.
 type HugoPage struct {
 	*content.Page
-	Site *SiteData
+	Site    *SiteData
+	scratch *Scratch
+	store   *Scratch
 }
 
 // Date returns HugoTime for flexible Format calls in templates.
@@ -128,11 +130,21 @@ func (hp *HugoPage) Data() *PageData {
 	return &PageData{Terms: &TermsData{}}
 }
 
-// Scratch returns a scratch pad for the page.
-func (hp *HugoPage) Scratch() *Scratch { return newScratch() }
+// Scratch returns a persistent scratch pad for the page.
+func (hp *HugoPage) Scratch() *Scratch {
+	if hp.scratch == nil {
+		hp.scratch = newScratch()
+	}
+	return hp.scratch
+}
 
-// Store returns a scratch pad (alias for Scratch in newer Hugo).
-func (hp *HugoPage) Store() *Scratch { return newScratch() }
+// Store returns a persistent scratch pad (Hugo 0.117+: .Store).
+func (hp *HugoPage) Store() *Scratch {
+	if hp.store == nil {
+		hp.store = newScratch()
+	}
+	return hp.store
+}
 
 // TableOfContents returns empty (stub).
 func (hp *HugoPage) TableOfContents() template.HTML { return "" }
@@ -824,6 +836,9 @@ func (ht HugoTime) Format(layout any) string {
 	if l == "" {
 		l = "2006-01-02"
 	}
+	if mapped, ok := dateFormatLayouts[l]; ok {
+		l = mapped
+	}
 	return ht.Time.Format(l)
 }
 
@@ -842,6 +857,8 @@ type TemplateData struct {
 	SidebarBack      *content.Page   // back-link target (nil = no back link)
 	PrevPage         *content.Page   // previous sibling (for pager)
 	NextPage         *content.Page   // next sibling (for pager)
+	scratch          *Scratch
+	store            *Scratch
 }
 
 // Hugo-compatible page field forwarding methods on TemplateData.
@@ -1184,11 +1201,21 @@ type outputFormatsStub struct{}
 
 func (o *outputFormatsStub) Get(name string) *stubResource { return nil }
 
-// Scratch returns a scratch pad for Hugo's .Scratch.
-func (d *TemplateData) Scratch() *Scratch { return newScratch() }
+// Scratch returns a persistent scratch pad for Hugo's .Scratch.
+func (d *TemplateData) Scratch() *Scratch {
+	if d.scratch == nil {
+		d.scratch = newScratch()
+	}
+	return d.scratch
+}
 
-// Store returns a scratch pad (Hugo 0.117+: .Store).
-func (d *TemplateData) Store() *Scratch { return newScratch() }
+// Store returns a persistent scratch pad (Hugo 0.117+: .Store).
+func (d *TemplateData) Store() *Scratch {
+	if d.store == nil {
+		d.store = newScratch()
+	}
+	return d.store
+}
 
 // Language returns the site language object.
 func (d *TemplateData) Language() *SiteLanguage {
@@ -1674,6 +1701,14 @@ func anyToStr(v any) string {
 		return string(s)
 	}
 	return fmt.Sprintf("%v", v)
+}
+
+func toIntDef(v any, def int) int {
+	n, ok := toInt(v)
+	if !ok {
+		return def
+	}
+	return n
 }
 
 func toInt(v any) (int, bool) {
@@ -2355,10 +2390,25 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 			}
 			return false
 		},
-		"seq": func(n int) []int {
-			result := make([]int, n)
-			for i := range result {
-				result[i] = i + 1
+		"seq": func(args ...any) []int {
+			// Hugo seq: seq last | seq first last | seq first increment last
+			var first, incr, last int
+			switch len(args) {
+			case 1:
+				first, incr, last = 1, 1, toIntDef(args[0], 1)
+			case 2:
+				first, incr, last = toIntDef(args[0], 1), 1, toIntDef(args[1], 1)
+			case 3:
+				first, incr, last = toIntDef(args[0], 1), toIntDef(args[1], 1), toIntDef(args[2], 1)
+			default:
+				return nil
+			}
+			if incr == 0 {
+				return nil
+			}
+			var result []int
+			for i := first; (incr > 0 && i <= last) || (incr < 0 && i >= last); i += incr {
+				result = append(result, i)
 			}
 			return result
 		},

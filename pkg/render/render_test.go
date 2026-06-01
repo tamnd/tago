@@ -183,7 +183,7 @@ func TestFuncRelURL(t *testing.T) {
 func TestFuncSeq(t *testing.T) {
 	r := makeRenderer(t)
 	fm := r.buildFuncMap()
-	seqFn := fm["seq"].(func(int) []int)
+	seqFn := fm["seq"].(func(...any) []int)
 
 	result := seqFn(5)
 	if len(result) != 5 {
@@ -617,11 +617,6 @@ func TestTimeNamespaceFormat(t *testing.T) {
 }
 
 // --- Hugo compatibility integration tests ---
-
-// renderTmpl is declared but unused; kept as a helper for future tests.
-var _ = func(t *testing.T, r *Renderer, tmplStr string, ctx any) string {
-	return tmplStr
-}
 
 // TestHugoCompatStringsFuncs checks strings namespace: HasPrefix, HasSuffix, Contains, TrimSpace, ToLower, etc.
 func TestHugoCompatStringsFuncs(t *testing.T) {
@@ -1229,5 +1224,647 @@ func TestHugoCompatHugoPageListSorting(t *testing.T) {
 	last1 := pages.Last(1)
 	if len(last1) != 1 {
 		t.Errorf("Last(1) len = %d, want 1", len(last1))
+	}
+}
+
+// --- Integration tests: actual template rendering ---
+
+// renderPartialStr is a test helper that renders a partial template string using a temp layout dir.
+func renderPartialStr(t *testing.T, tmplSrc string, ctx any) string {
+	t.Helper()
+	dir := t.TempDir()
+	layoutsDir := filepath.Join(dir, "layouts")
+	partialsDir := filepath.Join(layoutsDir, "partials")
+	if err := os.MkdirAll(partialsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(partialsDir, "test.html"), []byte(tmplSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := makeRendererWithLayouts(t, layoutsDir)
+	out, err := r.renderPartialAny("test", ctx)
+	if err != nil {
+		t.Fatalf("render error: %v", err)
+	}
+	switch v := out.(type) {
+	case template.HTML:
+		return strings.TrimSpace(string(v))
+	case string:
+		return strings.TrimSpace(v)
+	}
+	return ""
+}
+
+// TestIntegrationRangePages tests ranging over .Pages in a template.
+func TestIntegrationRangePages(t *testing.T) {
+	site := makeSite()
+	site.AllRegularPages = []*content.Page{
+		{Title: "Post A", Kind: "page", Section: "posts", RelPermalink: "/posts/a/"},
+		{Title: "Post B", Kind: "page", Section: "posts", RelPermalink: "/posts/b/"},
+	}
+
+	tmpl := `{{ range .Site.RegularPages }}{{ .Title }},{{ end }}`
+	got := renderPartialStr(t, tmpl, &TemplateData{
+		Page: &content.Page{Kind: "home"},
+		Site: site,
+	})
+	if !strings.Contains(got, "Post A") || !strings.Contains(got, "Post B") {
+		t.Errorf("range .Site.RegularPages = %q, should contain Post A and Post B", got)
+	}
+}
+
+// TestIntegrationWhereFilter tests where filter in templates.
+func TestIntegrationWhereFilter(t *testing.T) {
+	site := makeSite()
+	site.AllRegularPages = []*content.Page{
+		{Title: "Draft Post", Kind: "page", Draft: true},
+		{Title: "Published Post", Kind: "page", Draft: false},
+	}
+
+	tmpl := `{{ range where .Site.RegularPages "Draft" false }}{{ .Title }}{{ end }}`
+	got := renderPartialStr(t, tmpl, &TemplateData{
+		Page: &content.Page{Kind: "home"},
+		Site: site,
+	})
+	if !strings.Contains(got, "Published Post") {
+		t.Errorf("where Draft=false should include Published Post, got: %q", got)
+	}
+	if strings.Contains(got, "Draft Post") {
+		t.Errorf("where Draft=false should not include Draft Post, got: %q", got)
+	}
+}
+
+// TestIntegrationScratchInTemplate tests Scratch.Set/Get in template rendering.
+func TestIntegrationScratchInTemplate(t *testing.T) {
+	tmpl := `{{ .Scratch.Set "msg" "hello" }}{{ .Scratch.Get "msg" }}`
+	page := &content.Page{Kind: "page", Title: "Test"}
+	site := makeSite()
+	got := renderPartialStr(t, tmpl, &TemplateData{
+		Page: page,
+		Site: site,
+	})
+	if got != "hello" {
+		t.Errorf("Scratch.Set/Get in template = %q, want hello", got)
+	}
+}
+
+// TestIntegrationScratchAdd tests Scratch.Add accumulation in template.
+func TestIntegrationScratchAdd(t *testing.T) {
+	tmpl := `{{ .Scratch.Set "n" 0 }}{{ .Scratch.Add "n" 1 }}{{ .Scratch.Add "n" 2 }}{{ .Scratch.Get "n" }}`
+	page := &content.Page{Kind: "page"}
+	site := makeSite()
+	got := renderPartialStr(t, tmpl, &TemplateData{Page: page, Site: site})
+	if got != "3" {
+		t.Errorf("Scratch.Add in template = %q, want 3", got)
+	}
+}
+
+// TestIntegrationPartialReturn tests {{ return }} in partials from template execution.
+func TestIntegrationPartialReturn(t *testing.T) {
+	dir := t.TempDir()
+	layoutsDir := filepath.Join(dir, "layouts")
+	partialsDir := filepath.Join(layoutsDir, "partials")
+	if err := os.MkdirAll(partialsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Partial that returns a value
+	if err := os.WriteFile(filepath.Join(partialsDir, "getval.html"), []byte(`{{ return "computed" }}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Caller that uses the returned value
+	if err := os.WriteFile(filepath.Join(partialsDir, "caller.html"), []byte(`{{ $v := partial "getval" . }}result:{{ $v }}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := makeRendererWithLayouts(t, layoutsDir)
+	out, err := r.renderPartialAny("caller", nil)
+	if err != nil {
+		t.Fatalf("renderPartialAny error: %v", err)
+	}
+	if string(out.(template.HTML)) != "result:computed" {
+		t.Errorf("partial return = %q, want result:computed", out)
+	}
+}
+
+// TestIntegrationHugoTimeFormat tests date formatting in templates.
+func TestIntegrationHugoTimeFormat(t *testing.T) {
+	ts := time.Date(2024, 3, 15, 12, 30, 0, 0, time.UTC)
+	page := &content.Page{Kind: "page", Date: ts}
+	site := makeSite()
+
+	tmpl := `{{ .Date.Format "2006-01-02" }}`
+	got := renderPartialStr(t, tmpl, &TemplateData{Page: page, Site: site})
+	if got != "2024-03-15" {
+		t.Errorf("Date.Format = %q, want 2024-03-15", got)
+	}
+
+	tmpl2 := `{{ .Date.Format ":date_long" }}`
+	got2 := renderPartialStr(t, tmpl2, &TemplateData{Page: page, Site: site})
+	if !strings.Contains(got2, "2024") || !strings.Contains(got2, "March") {
+		t.Errorf("Date.Format :date_long = %q, should contain March 2024", got2)
+	}
+}
+
+// TestIntegrationSiteParams tests accessing site params in templates.
+func TestIntegrationSiteParams(t *testing.T) {
+	site := makeSite()
+	site.Params["brand"] = "MyBlog"
+	site.Params["colors"] = []string{"red", "blue"}
+
+	page := &content.Page{Kind: "home"}
+	tmpl := `{{ .Site.Params.brand }}`
+	got := renderPartialStr(t, tmpl, &TemplateData{Page: page, Site: site})
+	if got != "MyBlog" {
+		t.Errorf("Site.Params.brand = %q, want MyBlog", got)
+	}
+}
+
+// TestIntegrationPageParam tests .Param with site fallback.
+func TestIntegrationPageParam(t *testing.T) {
+	site := makeSite()
+	site.Params["sitewide"] = "fromsite"
+
+	page := &content.Page{
+		Kind:   "page",
+		Params: map[string]any{"local": "frompage"},
+	}
+
+	tmpl := `{{ .Param "local" }}/{{ .Param "sitewide" }}`
+	got := renderPartialStr(t, tmpl, &TemplateData{Page: page, Site: site})
+	if got != "frompage/fromsite" {
+		t.Errorf(".Param = %q, want frompage/fromsite", got)
+	}
+}
+
+// TestIntegrationConditionalWith tests {{ with }} and {{ if }} with nil values.
+func TestIntegrationConditionalWith(t *testing.T) {
+	site := makeSite()
+	page := &content.Page{Kind: "page", Description: "A post"}
+
+	// {{ with }} on non-empty string
+	tmpl := `{{ with .Description }}yes{{ else }}no{{ end }}`
+	got := renderPartialStr(t, tmpl, &TemplateData{Page: page, Site: site})
+	if got != "yes" {
+		t.Errorf("with .Description = %q, want yes", got)
+	}
+
+	// {{ with }} on nil Resources (should be falsy)
+	tmpl2 := `{{ with .Resources }}has-resources{{ else }}no-resources{{ end }}`
+	got2 := renderPartialStr(t, tmpl2, &TemplateData{Page: page, Site: site})
+	if got2 != "no-resources" {
+		t.Errorf("with .Resources = %q, want no-resources (nil slice is falsy)", got2)
+	}
+}
+
+// TestIntegrationRangeResources tests {{ range .Resources }} does not panic.
+func TestIntegrationRangeResources(t *testing.T) {
+	site := makeSite()
+	page := &content.Page{Kind: "page"}
+	tmpl := `{{ $count := 0 }}{{ range .Resources }}{{ $count = add $count 1 }}{{ end }}count={{ $count }}`
+	got := renderPartialStr(t, tmpl, &TemplateData{Page: page, Site: site})
+	if got != "count=0" {
+		t.Errorf("range .Resources = %q, want count=0", got)
+	}
+}
+
+// TestIntegrationFirstLast tests first/last functions in templates.
+func TestIntegrationFirstLast(t *testing.T) {
+	site := makeSite()
+	site.AllRegularPages = []*content.Page{
+		{Title: "A", Kind: "page"},
+		{Title: "B", Kind: "page"},
+		{Title: "C", Kind: "page"},
+		{Title: "D", Kind: "page"},
+		{Title: "E", Kind: "page"},
+	}
+
+	page := &content.Page{Kind: "home"}
+	tmpl := `{{ range first 3 .Site.RegularPages }}{{ .Title }}{{ end }}`
+	got := renderPartialStr(t, tmpl, &TemplateData{Page: page, Site: site})
+	if got != "ABC" {
+		t.Errorf("first 3 pages = %q, want ABC", got)
+	}
+
+	tmpl2 := `{{ range last 2 .Site.RegularPages }}{{ .Title }}{{ end }}`
+	got2 := renderPartialStr(t, tmpl2, &TemplateData{Page: page, Site: site})
+	if got2 != "DE" {
+		t.Errorf("last 2 pages = %q, want DE", got2)
+	}
+}
+
+// TestIntegrationSliceAndRange tests slice + range with .Reverse.
+func TestIntegrationSliceAndRange(t *testing.T) {
+	tmpl := `{{ $s := slice "a" "b" "c" }}{{ range $s.Reverse }}{{ . }}{{ end }}`
+	site := makeSite()
+	got := renderPartialStr(t, tmpl, &TemplateData{
+		Page: &content.Page{Kind: "page"},
+		Site: site,
+	})
+	if got != "cba" {
+		t.Errorf("slice.Reverse range = %q, want cba", got)
+	}
+}
+
+// TestIntegrationDictAccess tests dict creation and field access in templates.
+func TestIntegrationDictAccess(t *testing.T) {
+	tmpl := `{{ $d := dict "name" "alice" "age" 30 }}{{ $d.name }}/{{ $d.age }}`
+	site := makeSite()
+	got := renderPartialStr(t, tmpl, &TemplateData{
+		Page: &content.Page{Kind: "page"},
+		Site: site,
+	})
+	if got != "alice/30" {
+		t.Errorf("dict access = %q, want alice/30", got)
+	}
+}
+
+// TestIntegrationStringsFuncs tests strings namespace functions in templates.
+func TestIntegrationStringsFuncs(t *testing.T) {
+	site := makeSite()
+	ctx := &TemplateData{Page: &content.Page{Kind: "page"}, Site: site}
+
+	tests := []struct {
+		tmpl string
+		want string
+	}{
+		{`{{ strings.HasPrefix "foobar" "foo" }}`, "true"},
+		{`{{ strings.HasSuffix "foobar" "bar" }}`, "true"},
+		{`{{ strings.Contains "hello world" "world" }}`, "true"},
+		{`{{ lower "HELLO" }}`, "hello"},
+		{`{{ upper "hello" }}`, "HELLO"},
+		{`{{ trim " hello " " " }}`, "hello"},
+		{`{{ replace "hello" "l" "r" }}`, "herro"},
+		{`{{ len "hello" }}`, "5"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.tmpl, func(t *testing.T) {
+			got := renderPartialStr(t, tt.tmpl, ctx)
+			if got != tt.want {
+				t.Errorf("template %q = %q, want %q", tt.tmpl, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIntegrationMathFuncs tests math operations in templates.
+func TestIntegrationMathFuncs(t *testing.T) {
+	site := makeSite()
+	ctx := &TemplateData{Page: &content.Page{Kind: "page"}, Site: site}
+
+	tests := []struct {
+		tmpl string
+		want string
+	}{
+		{`{{ add 3 4 }}`, "7"},
+		{`{{ sub 10 3 }}`, "7"},
+		{`{{ mul 3 4 }}`, "12"},
+		{`{{ div 10 2 }}`, "5"},
+		{`{{ mod 7 3 }}`, "1"},
+		{`{{ modBool 6 3 }}`, "true"},
+		{`{{ modBool 7 3 }}`, "false"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.tmpl, func(t *testing.T) {
+			got := renderPartialStr(t, tt.tmpl, ctx)
+			if got != tt.want {
+				t.Errorf("template %q = %q, want %q", tt.tmpl, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIntegrationSiteTitle tests accessing .Site.Title in a template.
+func TestIntegrationSiteTitle(t *testing.T) {
+	site := makeSite()
+	tmpl := `{{ .Site.Title }}`
+	got := renderPartialStr(t, tmpl, &TemplateData{
+		Page: &content.Page{Kind: "home"},
+		Site: site,
+	})
+	if got != "Test Site" {
+		t.Errorf(".Site.Title = %q, want 'Test Site'", got)
+	}
+}
+
+// TestIntegrationPageTitle tests accessing page title fields.
+func TestIntegrationPageTitle(t *testing.T) {
+	site := makeSite()
+	page := &content.Page{Kind: "page", Title: "My Article"}
+	tmpl := `{{ .Title }}`
+	got := renderPartialStr(t, tmpl, &TemplateData{Page: page, Site: site})
+	if got != "My Article" {
+		t.Errorf(".Title = %q, want 'My Article'", got)
+	}
+}
+
+// TestIntegrationRangeMenu tests ranging over .Site.Menus.main.
+func TestIntegrationRangeMenu(t *testing.T) {
+	site := makeSite()
+	site.Menus = map[string][]SiteMenuItem{
+		"main": {
+			{Name: "Home", URL: "/"},
+			{Name: "About", URL: "/about/"},
+		},
+	}
+	tmpl := `{{ range .Site.Menus.main }}{{ .Name }}:{{ .URL }},{{ end }}`
+	got := renderPartialStr(t, tmpl, &TemplateData{
+		Page: &content.Page{Kind: "home"},
+		Site: site,
+	})
+	if !strings.Contains(got, "Home:/") || !strings.Contains(got, "About:/about/") {
+		t.Errorf("range .Site.Menus.main = %q, want Home and About entries", got)
+	}
+}
+
+// TestIntegrationSiteTaxonomies tests accessing .Site.Taxonomies in a template.
+func TestIntegrationSiteTaxonomies(t *testing.T) {
+	site := makeSite()
+	site.AllRegularPages = []*content.Page{
+		{Title: "A", Tags: []string{"go", "web"}},
+		{Title: "B", Tags: []string{"go"}},
+	}
+	tmpl := `{{ range $name, $entry := .Site.Taxonomies.tags }}{{ $name }}:{{ $entry.Count }},{{ end }}`
+	got := renderPartialStr(t, tmpl, &TemplateData{
+		Page: &content.Page{Kind: "taxonomy"},
+		Site: site,
+	})
+	if !strings.Contains(got, "go:2") {
+		t.Errorf("Site.Taxonomies.tags = %q, should contain go:2", got)
+	}
+	if !strings.Contains(got, "web:1") {
+		t.Errorf("Site.Taxonomies.tags = %q, should contain web:1", got)
+	}
+}
+
+// TestIntegrationMarkdownify tests markdownify function in templates.
+func TestIntegrationMarkdownify(t *testing.T) {
+	site := makeSite()
+	page := &content.Page{Kind: "page"}
+	tmpl := `{{ markdownify "**bold** text" }}`
+	got := renderPartialStr(t, tmpl, &TemplateData{Page: page, Site: site})
+	if !strings.Contains(got, "strong") && !strings.Contains(got, "bold") {
+		t.Errorf("markdownify = %q, should contain strong or bold markup", got)
+	}
+}
+
+// TestIntegrationSafeHTML tests safeHTML function in templates.
+func TestIntegrationSafeHTML(t *testing.T) {
+	site := makeSite()
+	page := &content.Page{Kind: "page"}
+	tmpl := `{{ "<strong>test</strong>" | safeHTML }}`
+	got := renderPartialStr(t, tmpl, &TemplateData{Page: page, Site: site})
+	if !strings.Contains(got, "<strong>test</strong>") {
+		t.Errorf("safeHTML = %q, should pass through raw HTML", got)
+	}
+}
+
+// TestIntegrationDefault tests the default function.
+func TestIntegrationDefault(t *testing.T) {
+	site := makeSite()
+	page := &content.Page{Kind: "page"}
+	ctx := &TemplateData{Page: page, Site: site}
+
+	tmpl := `{{ default "fallback" .Params.missing }}`
+	got := renderPartialStr(t, tmpl, ctx)
+	if got != "fallback" {
+		t.Errorf("default with missing param = %q, want fallback", got)
+	}
+
+	page.Params = map[string]any{"key": "value"}
+	tmpl2 := `{{ default "fallback" .Params.key }}`
+	got2 := renderPartialStr(t, tmpl2, ctx)
+	if got2 != "value" {
+		t.Errorf("default with set param = %q, want value", got2)
+	}
+}
+
+// TestIntegrationAbsURL tests absURL and relURL functions.
+func TestIntegrationAbsURL(t *testing.T) {
+	site := makeSite()
+	page := &content.Page{Kind: "page"}
+	ctx := &TemplateData{Page: page, Site: site}
+
+	tmpl := `{{ absURL "/posts/hello/" }}`
+	got := renderPartialStr(t, tmpl, ctx)
+	if !strings.HasPrefix(got, "http://localhost:1313/") {
+		t.Errorf("absURL = %q, should start with baseURL", got)
+	}
+
+	tmpl2 := `{{ relURL "/posts/hello/" }}`
+	got2 := renderPartialStr(t, tmpl2, ctx)
+	if !strings.HasPrefix(got2, "/") {
+		t.Errorf("relURL = %q, should start with /", got2)
+	}
+}
+
+// TestIntegrationPreprocessReturnRewrite tests that {{ return funcname args }} is rewritten.
+func TestIntegrationPreprocessReturnRewrite(t *testing.T) {
+	// "{{ return upper .Title }}" should be rewritten to "{{ return (upper .Title) }}"
+	src := `{{ return upper .Title }}`
+	result := preprocessTemplate(src)
+	if !strings.Contains(result, "(upper .Title)") {
+		t.Errorf("preprocessTemplate did not rewrite return: %q", result)
+	}
+
+	// Already wrapped should not be double-wrapped
+	src2 := `{{ return (dict "key" "val") }}`
+	result2 := preprocessTemplate(src2)
+	if strings.Contains(result2, "((") {
+		t.Errorf("preprocessTemplate double-wrapped: %q", result2)
+	}
+}
+
+// TestIntegrationPreprocessTemplatePartials tests that template "partials/X" is rewritten.
+func TestIntegrationPreprocessTemplatePartials(t *testing.T) {
+	src := `{{ template "partials/pagination.html" . }}`
+	result := preprocessTemplate(src)
+	if !strings.Contains(result, `partial "pagination.html"`) {
+		t.Errorf("preprocessTemplate did not rewrite template partial: %q", result)
+	}
+
+	src2 := `{{- template "partials/nav.html" .Site -}}`
+	result2 := preprocessTemplate(src2)
+	if !strings.Contains(result2, `partial "nav.html"`) {
+		t.Errorf("preprocessTemplate did not rewrite template partial with context: %q", result2)
+	}
+}
+
+// TestIntegrationSiteHomeStub tests Site.Home and Site.GetPage stubs.
+func TestIntegrationSiteHomeStub(t *testing.T) {
+	site := makeSite()
+	page := &content.Page{Kind: "page"}
+	ctx := &TemplateData{Page: page, Site: site}
+
+	tmpl := `{{ .Site.Home.IsHome }}`
+	got := renderPartialStr(t, tmpl, ctx)
+	if got != "true" {
+		t.Errorf(".Site.Home.IsHome = %q, want true", got)
+	}
+
+	tmpl2 := `{{ with .Site.Home.Resources }}has{{ else }}empty{{ end }}`
+	got2 := renderPartialStr(t, tmpl2, ctx)
+	if got2 != "empty" {
+		t.Errorf(".Site.Home.Resources with = %q, want empty (nil)", got2)
+	}
+}
+
+// TestIntegrationHugoObject tests hugo.IsServer and hugo.Generator.
+func TestIntegrationHugoObject(t *testing.T) {
+	site := makeSite()
+	ctx := &TemplateData{Page: &content.Page{Kind: "page"}, Site: site}
+
+	tmpl := `{{ hugo.IsServer }}`
+	got := renderPartialStr(t, tmpl, ctx)
+	// IsServer is false in test (not serving)
+	if got != "false" && got != "true" {
+		t.Errorf("hugo.IsServer = %q, want bool", got)
+	}
+
+	tmpl2 := `{{ hugo.Generator }}`
+	got2 := renderPartialStr(t, tmpl2, ctx)
+	if !strings.Contains(got2, "generator") && !strings.Contains(got2, "tago") && !strings.Contains(got2, "Hugo") {
+		t.Errorf("hugo.Generator = %q, should contain generator tag", got2)
+	}
+}
+
+// TestIntegrationPathFuncs tests path namespace functions.
+func TestIntegrationPathFuncs(t *testing.T) {
+	site := makeSite()
+	ctx := &TemplateData{Page: &content.Page{Kind: "page"}, Site: site}
+
+	tests := []struct {
+		tmpl string
+		want string
+	}{
+		{`{{ path.Join "images" "cover.jpg" }}`, "images/cover.jpg"},
+		{`{{ path.Base "images/cover.jpg" }}`, "cover.jpg"},
+		{`{{ path.Ext "cover.jpg" }}`, ".jpg"},
+		{`{{ path.Dir "images/cover.jpg" }}`, "images"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.tmpl, func(t *testing.T) {
+			got := renderPartialStr(t, tt.tmpl, ctx)
+			if got != tt.want {
+				t.Errorf("template %q = %q, want %q", tt.tmpl, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIntegrationNowFunction tests the now function.
+func TestIntegrationNowFunction(t *testing.T) {
+	site := makeSite()
+	ctx := &TemplateData{Page: &content.Page{Kind: "page"}, Site: site}
+
+	tmpl := `{{ now.Format "2006" }}`
+	got := renderPartialStr(t, tmpl, ctx)
+	// Should be a valid 4-digit year
+	if len(got) != 4 {
+		t.Errorf("now.Format 2006 = %q, want 4-digit year", got)
+	}
+}
+
+// TestIntegrationFindREFunction tests findRE for regex matching.
+func TestIntegrationFindREFunction(t *testing.T) {
+	site := makeSite()
+	ctx := &TemplateData{Page: &content.Page{Kind: "page"}, Site: site}
+
+	tmpl := `{{ $m := findRE "[0-9]+" "abc123def456" }}{{ len $m }}`
+	got := renderPartialStr(t, tmpl, ctx)
+	if got != "2" {
+		t.Errorf("findRE count = %q, want 2", got)
+	}
+}
+
+// TestIntegrationSeqFunction tests the seq function.
+func TestIntegrationSeqFunction(t *testing.T) {
+	site := makeSite()
+	ctx := &TemplateData{Page: &content.Page{Kind: "page"}, Site: site}
+
+	tmpl := `{{ range seq 1 3 }}{{ . }}{{ end }}`
+	got := renderPartialStr(t, tmpl, ctx)
+	if got != "123" {
+		t.Errorf("seq 1 3 = %q, want 123", got)
+	}
+}
+
+// TestIntegrationURLsParse tests urls.Parse returning parsedURL.
+func TestIntegrationURLsParse(t *testing.T) {
+	site := makeSite()
+	ctx := &TemplateData{Page: &content.Page{Kind: "page"}, Site: site}
+
+	tmpl := `{{ $u := urls.Parse "https://example.com/path?q=1" }}{{ $u.Host }}/{{ $u.Path }}`
+	got := renderPartialStr(t, tmpl, ctx)
+	if got != "example.com//path" {
+		t.Errorf("urls.Parse = %q, want example.com//path", got)
+	}
+}
+
+// TestIntegrationReflectIsSlice tests reflect.IsSlice in templates.
+func TestIntegrationReflectIsSlice(t *testing.T) {
+	site := makeSite()
+	ctx := &TemplateData{Page: &content.Page{Kind: "page"}, Site: site}
+
+	tmpl := `{{ reflect.IsSlice (slice 1 2 3) }}`
+	got := renderPartialStr(t, tmpl, ctx)
+	if got != "true" {
+		t.Errorf("reflect.IsSlice(slice) = %q, want true", got)
+	}
+
+	tmpl2 := `{{ reflect.IsSlice "notaslice" }}`
+	got2 := renderPartialStr(t, tmpl2, ctx)
+	if got2 != "false" {
+		t.Errorf("reflect.IsSlice(string) = %q, want false", got2)
+	}
+}
+
+// TestIntegrationPaginatorStub tests the paginator stub.
+func TestIntegrationPaginatorStub(t *testing.T) {
+	site := makeSite()
+	page := &content.Page{Kind: "home"}
+	ctx := &TemplateData{Page: page, Site: site}
+
+	tmpl := `{{ $p := .Paginator }}{{ $p.TotalPages }}`
+	got := renderPartialStr(t, tmpl, ctx)
+	// TotalPages is 0 or 1 in stub
+	if got != "0" && got != "1" {
+		t.Errorf("Paginator.TotalPages = %q, want 0 or 1", got)
+	}
+}
+
+// TestIntegrationSiteGlobal tests the global {{ site }} function.
+func TestIntegrationSiteGlobal(t *testing.T) {
+	site := makeSite()
+	ctx := &TemplateData{
+		Page: &content.Page{Kind: "page"},
+		Site: site,
+	}
+
+	tmpl := `{{ site.Title }}`
+	got := renderPartialStr(t, tmpl, ctx)
+	if got != "Test Site" {
+		t.Errorf("site.Title = %q, want Test Site", got)
+	}
+}
+
+// TestIntegrationIndexFunction tests the index function for map/slice access.
+func TestIntegrationIndexFunction(t *testing.T) {
+	site := makeSite()
+	ctx := &TemplateData{Page: &content.Page{Kind: "page"}, Site: site}
+
+	tmpl := `{{ $m := dict "a" "alpha" "b" "beta" }}{{ index $m "a" }}`
+	got := renderPartialStr(t, tmpl, ctx)
+	if got != "alpha" {
+		t.Errorf("index dict = %q, want alpha", got)
+	}
+
+	tmpl2 := `{{ $s := slice "x" "y" "z" }}{{ index $s 1 }}`
+	got2 := renderPartialStr(t, tmpl2, ctx)
+	if got2 != "y" {
+		t.Errorf("index slice = %q, want y", got2)
 	}
 }
