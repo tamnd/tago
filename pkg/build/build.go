@@ -23,18 +23,19 @@ import (
 
 // Config holds the build configuration.
 type Config struct {
-	ContentDir     string
-	OutputDir      string
-	StaticDir      string
-	ThemeStaticDir string // optional: themes/<name>/static (overrides StaticDir for CSS/JS refs)
-	LayoutsDir     string
-	BaseURL        string
-	DefaultLang    string
-	SiteTitle      string
-	SiteDesc       string
-	EditURLBase    string
-	Clean          bool
-	LiveReload     bool
+	ContentDir      string
+	OutputDir       string
+	StaticDir       string
+	ThemeStaticDir  string // optional: themes/<name>/static (overrides StaticDir for CSS/JS refs)
+	LayoutsDir      string
+	BaseURL         string
+	DefaultLang     string
+	SiteTitle       string
+	SiteDesc        string
+	EditURLBase     string
+	Clean           bool
+	LiveReload      bool
+	SyntaxHighlight bool // enable Chroma server-side highlighting (slower builds)
 }
 
 // Stats holds build statistics.
@@ -57,6 +58,7 @@ func Build(cfg *Config) (*Stats, error) {
 	if cfg.DefaultLang == "" {
 		cfg.DefaultLang = "en"
 	}
+	content.SyntaxHighlight = cfg.SyntaxHighlight
 
 	// Clean build: delete output and cache
 	if cfg.Clean {
@@ -135,7 +137,9 @@ func Build(cfg *Config) (*Stats, error) {
 		parseJobs := make(chan string, len(changedFiles))
 		parseResults := make(chan parseResult, len(changedFiles))
 		var parseWg sync.WaitGroup
-		for range runtime.NumCPU() {
+		// More workers than CPUs: parsing is I/O-heavy (read markdown files).
+		parseWorkers := runtime.NumCPU() * 3
+		for range parseWorkers {
 			parseWg.Add(1)
 			go func() {
 				defer parseWg.Done()
@@ -316,6 +320,10 @@ func Build(cfg *Config) (*Stats, error) {
 
 	renderer := render.New(site, rAssets, cfg.LayoutsDir, cfg.LiveReload)
 
+	// Pre-warm all templates to initialize html/template's lazy auto-escaping.
+	// After this, concurrent Execute calls on the same template are safe without Clone().
+	renderer.Prewarm()
+
 	// Collect pages that need rendering.
 	var renderQueue []*content.Page
 	for _, page := range pageSlice {
@@ -353,8 +361,12 @@ func Build(cfg *Config) (*Stats, error) {
 	}
 	close(renderJobs)
 
+	// Use more workers than CPUs for I/O-bound rendering (file reads + writes).
+	// Without Chroma, per-page work is light CPU but involves 2 syscalls per page
+	// (read markdown + write HTML). Extra goroutines keep the NVMe queue full.
+	renderWorkers := runtime.NumCPU() * 3
 	var renderWg sync.WaitGroup
-	for range runtime.NumCPU() {
+	for range renderWorkers {
 		renderWg.Add(1)
 		go func() {
 			defer renderWg.Done()

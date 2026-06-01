@@ -426,16 +426,10 @@ func (r *Renderer) renderToFile(kind, outputPath string, data *TemplateData) err
 		return err
 	}
 
-	// Clone so each goroutine gets its own copy; html/template lazily initializes
-	// its escaping maps on first Execute, and concurrent initialization races.
-	t, err = t.Clone()
-	if err != nil {
-		return fmt.Errorf("clone template %q: %w", kind, err)
-	}
-
 	// Render to an in-memory buffer first so template execution (many small writes)
 	// stays in RAM, then flush to disk in one WriteFile call (one syscall per page).
-	// This halves filesystem metadata overhead compared to streaming directly to a file.
+	// Clone() is not needed here because Prewarm() pre-initializes html/template's
+	// lazy auto-escaping state; subsequent concurrent Executes are safe read-only.
 	var buf bytes.Buffer
 	buf.Grow(32 * 1024)
 	if err := t.Execute(&buf, data); err != nil {
@@ -449,6 +443,19 @@ func (r *Renderer) renderToFile(kind, outputPath string, data *TemplateData) err
 		return fmt.Errorf("write %s: %w", outputPath, err)
 	}
 	return nil
+}
+
+// Prewarm executes each known template kind once with empty data to trigger
+// html/template's lazy auto-escaping initialization. After this, concurrent
+// Execute calls on the same template are safe without Clone().
+func (r *Renderer) Prewarm() {
+	for _, kind := range []string{"page", "section", "home", "404", "term", "taxonomy", "search", "graph", "tree", "calendar"} {
+		if t, err := r.getTemplate(kind); err == nil {
+			var buf bytes.Buffer
+			// Empty TemplateData is sufficient to trigger escaping initialization.
+			_ = t.Execute(&buf, &TemplateData{Page: &content.Page{Kind: kind}})
+		}
+	}
 }
 
 // InvalidateCache clears the template cache (useful after layout file changes).

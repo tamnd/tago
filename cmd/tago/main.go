@@ -67,18 +67,19 @@ Serve flags:
 }
 
 type flags struct {
-	content     string
-	output      string
-	static      string
-	layouts     string
-	theme       string // optional theme name → themes/<name>/layouts + themes/<name>/static
-	themeStatic string // derived from theme
-	baseURL     string
-	title       string
-	desc        string
-	lang        string // default language code, e.g. "en", "vi", "ja"
-	clean       bool
-	port        int
+	content         string
+	output          string
+	static          string
+	layouts         string
+	theme           string // optional theme name → themes/<name>/layouts + themes/<name>/static
+	themeStatic     string // derived from theme
+	baseURL         string
+	title           string
+	desc            string
+	lang            string // default language code, e.g. "en", "vi", "ja"
+	clean           bool
+	syntaxHighlight bool // enable Chroma server-side syntax highlighting
+	port            int
 }
 
 func parseFlags(args []string) *flags {
@@ -137,6 +138,8 @@ func parseFlags(args []string) *flags {
 			}
 		case "--clean":
 			f.clean = true
+		case "--syntax-highlight":
+			f.syntaxHighlight = true
 		case "--port":
 			i++
 			if i < len(args) {
@@ -233,6 +236,8 @@ func loadTOML(f *flags) {
 			if f.lang == "" {
 				f.lang = val
 			}
+		case "syntaxHighlight", "syntax_highlight":
+			f.syntaxHighlight = val == "true" || val == "1" || val == "yes"
 		}
 	}
 }
@@ -304,17 +309,18 @@ func runBuild(args []string) {
 	}
 
 	cfg := &build.Config{
-		ContentDir:     f.content,
-		OutputDir:      f.output,
-		StaticDir:      f.static,
-		ThemeStaticDir: f.themeStatic,
-		LayoutsDir:     f.layouts,
-		BaseURL:        f.baseURL,
-		DefaultLang:    defaultLang,
-		SiteTitle:      f.title,
-		SiteDesc:       f.desc,
-		Clean:          f.clean,
-		LiveReload:     false,
+		ContentDir:      f.content,
+		OutputDir:       f.output,
+		StaticDir:       f.static,
+		ThemeStaticDir:  f.themeStatic,
+		LayoutsDir:      f.layouts,
+		BaseURL:         f.baseURL,
+		DefaultLang:     defaultLang,
+		SiteTitle:       f.title,
+		SiteDesc:        f.desc,
+		Clean:           f.clean,
+		LiveReload:      false,
+		SyntaxHighlight: f.syntaxHighlight,
 	}
 
 	stats, err := build.Build(cfg)

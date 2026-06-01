@@ -230,6 +230,12 @@ func (mdLinkRewriterExt) Extend(m goldmark.Markdown) {
 	)
 }
 
+// SyntaxHighlight controls whether Chroma server-side syntax highlighting is
+// enabled. Default false: code blocks render as <pre><code class="language-xxx">
+// for client-side highlighters (Prism.js, highlight.js). Set true to enable
+// Chroma; note that Chroma adds ~50% to fresh build time on large corpora.
+var SyntaxHighlight bool
+
 // mdRendererPool pools goldmark.Markdown instances so concurrent ParseAndRender
 // calls each get their own instance (goldmark is not safe for concurrent use).
 var mdRendererPool = sync.Pool{
@@ -237,20 +243,23 @@ var mdRendererPool = sync.Pool{
 }
 
 func newMDRenderer() goldmark.Markdown {
-	return goldmark.New(
-		goldmark.WithExtensions(
-			extension.GFM,
-			meta.Meta,
-			mdLinkRewriterExt{},
-			highlighting.NewHighlighting(
-				highlighting.WithStyle("github"),
-				highlighting.WithGuessLanguage(true),
-				highlighting.WithFormatOptions(
-					chromahtml.WithClasses(true),
-					chromahtml.WithLineNumbers(false),
-				),
+	exts := []goldmark.Extender{
+		extension.GFM,
+		meta.Meta,
+		mdLinkRewriterExt{},
+	}
+	if SyntaxHighlight {
+		exts = append(exts, highlighting.NewHighlighting(
+			highlighting.WithStyle("github"),
+			highlighting.WithGuessLanguage(true),
+			highlighting.WithFormatOptions(
+				chromahtml.WithClasses(true),
+				chromahtml.WithLineNumbers(false),
 			),
-		),
+		))
+	}
+	return goldmark.New(
+		goldmark.WithExtensions(exts...),
 		goldmark.WithRendererOptions(
 			html.WithUnsafe(),
 		),
