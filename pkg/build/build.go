@@ -169,14 +169,14 @@ func Build(cfg *Config) (*Stats, error) {
 				log.Printf("tago: error parsing %s: %v", r.filePath, r.err)
 				continue
 			}
+			r.page.Kind = content.KindFromPath(cfg.ContentDir, r.filePath)
+			r.page.Section = content.SectionFromPath(cfg.ContentDir, r.filePath)
+			r.page.Depth = content.DepthFromPath(cfg.ContentDir, r.filePath)
 			basePermalink, lang := content.PermalinkFromPath(cfg.ContentDir, r.filePath, cfg.DefaultLang)
 			permalink := content.ApplySlugURL(basePermalink, r.page)
 			r.page.RelPermalink = permalink
 			r.page.Lang = lang
 			r.page.OutputPath = content.OutputPathFromPermalink(cfg.OutputDir, permalink)
-			r.page.Kind = content.KindFromPath(cfg.ContentDir, r.filePath)
-			r.page.Section = content.SectionFromPath(cfg.ContentDir, r.filePath)
-			r.page.Depth = content.DepthFromPath(cfg.ContentDir, r.filePath)
 			if info, serr := os.Stat(r.filePath); serr == nil {
 				r.page.FileSize = info.Size()
 				r.page.FileMtime = info.ModTime().UnixNano()

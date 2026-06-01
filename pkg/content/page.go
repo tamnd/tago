@@ -68,6 +68,10 @@ type Page struct {
 	// Arbitrary front matter params
 	Params map[string]any
 
+	// Cascade: front matter values to inherit down to descendant pages.
+	// Only set on section/home pages. Applied in BuildTree.
+	Cascade map[string]any
+
 	// Page classification
 	Kind    string // "page"|"section"|"home"|"term"|"taxonomy"
 	Lang    string
@@ -432,6 +436,20 @@ func ParseAndRender(filePath string) (*Page, error) {
 	}
 	if v, ok := fm["aliases"]; ok {
 		page.Aliases = toStringSlice(v)
+	}
+
+	// Cascade: propagate these front matter values to descendant pages
+	if v, ok := fm["cascade"]; ok {
+		switch cv := v.(type) {
+		case map[string]any:
+			page.Cascade = cv
+		case map[any]any:
+			m := make(map[string]any, len(cv))
+			for k, val := range cv {
+				m[toString(k)] = val
+			}
+			page.Cascade = m
+		}
 	}
 
 	// Taxonomy

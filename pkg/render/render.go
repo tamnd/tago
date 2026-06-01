@@ -509,11 +509,11 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 		"plainify": plainify,
 
 		// strings.* namespace (dot-notation names)
-		"strings.Contains":   strings.Contains,
-		"strings.HasPrefix":  strings.HasPrefix,
-		"strings.HasSuffix":  strings.HasSuffix,
-		"strings.TrimPrefix": strings.TrimPrefix,
-		"strings.TrimSuffix": strings.TrimSuffix,
+		"stringsContains":   strings.Contains,
+		"stringsHasPrefix":  strings.HasPrefix,
+		"stringsHasSuffix":  strings.HasSuffix,
+		"stringsTrimPrefix": strings.TrimPrefix,
+		"stringsTrimSuffix": strings.TrimSuffix,
 
 		// printf alias
 		"printf": fmt.Sprintf,
@@ -561,17 +561,20 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 			}
 			return a%b == 0
 		},
-		"math.Add":   func(a, b int) int { return a + b },
-		"math.Sub":   func(a, b int) int { return a - b },
-		"math.Mul":   func(a, b int) int { return a * b },
-		"math.Div":   func(a, b int) int { if b == 0 { return 0 }; return a / b },
-		"math.Mod":   func(a, b int) int { if b == 0 { return 0 }; return a % b },
-		"math.Abs":   func(x float64) float64 { return math.Abs(x) },
-		"math.Ceil":  func(x float64) float64 { return math.Ceil(x) },
-		"math.Floor": func(x float64) float64 { return math.Floor(x) },
-		"math.Round": func(x float64) float64 { return math.Round(x) },
-		"math.Log":   func(x float64) float64 { return math.Log(x) },
-		"math.Sqrt":  func(x float64) float64 { return math.Sqrt(x) },
+		// math functions — named without dots (Go template FuncMap identifiers must be valid Go identifiers)
+		// Hugo templates call these as {{ math.Ceil x }} using Hugo's namespace system;
+		// tago exposes them as flat names: mathCeil, mathFloor, etc., plus common aliases.
+		"mathAdd":   func(a, b int) int { return a + b },
+		"mathSub":   func(a, b int) int { return a - b },
+		"mathMul":   func(a, b int) int { return a * b },
+		"mathDiv":   func(a, b int) int { if b == 0 { return 0 }; return a / b },
+		"mathMod":   func(a, b int) int { if b == 0 { return 0 }; return a % b },
+		"mathAbs":   func(x float64) float64 { return math.Abs(x) },
+		"mathCeil":  func(x float64) float64 { return math.Ceil(x) },
+		"mathFloor": func(x float64) float64 { return math.Floor(x) },
+		"mathRound": func(x float64) float64 { return math.Round(x) },
+		"mathLog":   func(x float64) float64 { return math.Log(x) },
+		"mathSqrt":  func(x float64) float64 { return math.Sqrt(x) },
 
 		// Collections
 		"default": func(dflt, val any) any {
