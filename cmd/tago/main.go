@@ -13,7 +13,7 @@ import (
 	"github.com/tamnd/tago/pkg/server"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 func main() {
 	log.SetFlags(0)
