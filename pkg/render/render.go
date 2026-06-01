@@ -314,6 +314,9 @@ func (hp *HugoPage) RegularPages() HugoPageList { return nil }
 func (hp *HugoPage) Pages() HugoPageList { return nil }
 
 
+// Render renders the page with an alternative layout (stub — returns empty).
+func (hp *HugoPage) Render(layout string) template.HTML { return "" }
+
 // IsNode returns true if this is a list/section/home page.
 func (hp *HugoPage) IsNode() bool {
 	if hp.Page != nil {
@@ -339,6 +342,7 @@ type PageData struct {
 	Terms    *TermsData
 	Singular string // taxonomy type singular name, e.g. "tag"
 	Plural   string // taxonomy type plural name, e.g. "tags"
+	Term     string // for term pages: the specific term (e.g. "go")
 }
 
 // TermsData wraps taxonomy terms and provides Hugo-compatible methods.
@@ -519,6 +523,7 @@ func (l *SiteLanguage) Get(key string) any {
 
 // Hugo returns the hugo namespace (allows {{ .Site.Hugo.Version }} in templates).
 func (s *SiteData) Hugo() *hugoNamespace { return &hugoNamespace{} }
+func (s *SiteData) Social() map[string]string { return map[string]string{} }
 
 // Pages returns all site pages as HugoPageList (with sorting methods).
 func (s *SiteData) Pages() HugoPageList { return wrapPages(s.AllPages, s) }
@@ -679,6 +684,27 @@ type HugoTime struct {
 }
 
 func newHugoTime(t time.Time) HugoTime { return HugoTime{t} }
+
+// newHugoTimeFromAny converts any value to HugoTime.
+// Handles time.Time, HugoTime, and RFC3339/date strings.
+func newHugoTimeFromAny(v any) HugoTime {
+	if v == nil {
+		return HugoTime{}
+	}
+	switch val := v.(type) {
+	case time.Time:
+		return HugoTime{val}
+	case HugoTime:
+		return val
+	case string:
+		for _, layout := range []string{time.RFC3339, "2006-01-02", "2006-01-02T15:04:05", time.RFC822} {
+			if t, err := time.Parse(layout, val); err == nil {
+				return HugoTime{t}
+			}
+		}
+	}
+	return HugoTime{}
+}
 
 // Format overrides time.Time.Format to accept any format value (string, nil, etc.).
 func (ht HugoTime) Format(layout any) string {
@@ -1078,12 +1104,23 @@ func (d *TemplateData) CurrentSection() *TemplateData { return d }
 // All methods return empty/nil stubs — tago does not process page bundle resources.
 type pageResourcesStub struct{}
 
-func (r *pageResourcesStub) ByType(t string) *pageResourcesStub          { return r }
-func (r *pageResourcesStub) Match(pattern string) *pageResourcesStub      { return r }
-func (r *pageResourcesStub) Get(name string) *stubResource                { return nil }
-func (r *pageResourcesStub) GetMatch(pattern string) *stubResource        { return nil }
+// stubResourceSlice is a slice of stub resources; nil value is falsy in {{ with }} and safely rangeable.
+// Methods are defined on the slice type so chaining works: .Resources.ByType "image" | .GetMatch "..."
+type stubResourceSlice []*stubResource
+
+func (r *pageResourcesStub) ByType(t string) stubResourceSlice              { return nil }
+func (r *pageResourcesStub) Match(pattern string) stubResourceSlice          { return nil }
+func (r *pageResourcesStub) Get(name string) *stubResource                   { return nil }
+func (r *pageResourcesStub) GetMatch(pattern string) *stubResource           { return nil }
 func (r *pageResourcesStub) GetRemote(url string, opts ...any) *stubResource { return nil }
-func (r *pageResourcesStub) Len() int                                     { return 0 }
+func (r *pageResourcesStub) Len() int                                        { return 0 }
+
+func (s stubResourceSlice) GetMatch(pattern string) *stubResource           { return nil }
+func (s stubResourceSlice) Get(name string) *stubResource                   { return nil }
+func (s stubResourceSlice) GetRemote(url string, opts ...any) *stubResource { return nil }
+func (s stubResourceSlice) ByType(t string) stubResourceSlice               { return nil }
+func (s stubResourceSlice) Match(pattern string) stubResourceSlice          { return nil }
+func (s stubResourceSlice) Len() int                                        { return 0 }
 
 // NextInSection returns the next page in the section (alias for .Next).
 func (d *TemplateData) NextInSection() *content.Page {
@@ -1167,8 +1204,9 @@ func (d *TemplateData) Truncated() bool {
 	return len(d.Page.Summary) > 0 && d.Page.Summary != d.Page.ContentPlain
 }
 
-func (d *TemplateData) Sections() HugoPageList        { return nil }
+func (d *TemplateData) Sections() HugoPageList         { return nil }
 func (d *TemplateData) GetTerms(taxonomy string) []any { return nil }
+func (d *TemplateData) Render(layout string) template.HTML { return "" }
 func (d *TemplateData) Name() string {
 	if d.Page != nil {
 		if d.Page.Title != "" {
@@ -1452,6 +1490,24 @@ func indexInto(collection any, key any) any {
 }
 
 // toInt converts any numeric type to int.
+// anyToStr converts any value to string; nil returns "".
+func anyToStr(v any) string {
+	if v == nil {
+		return ""
+	}
+	switch s := v.(type) {
+	case string:
+		return s
+	case template.HTML:
+		return string(s)
+	case template.CSS:
+		return string(s)
+	case template.URL:
+		return string(s)
+	}
+	return fmt.Sprintf("%v", v)
+}
+
 func toInt(v any) (int, bool) {
 	switch n := v.(type) {
 	case int:
@@ -1633,7 +1689,8 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 			cn := &collectionsNamespace{}
 			return cn.Where(args...)
 		},
-		"first": func(n int, collection any) any {
+		"first": func(nAny any, collection any) any {
+			n, _ := toInt(nAny)
 			if pages, ok := collection.([]*content.Page); ok {
 				if n >= len(pages) {
 					return pages
@@ -1649,7 +1706,8 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 			}
 			return rv.Slice(0, n).Interface()
 		},
-		"last": func(n int, collection any) any {
+		"last": func(nAny any, collection any) any {
+			n, _ := toInt(nAny)
 			if pages, ok := collection.([]*content.Page); ok {
 				if n >= len(pages) {
 					return pages
@@ -1702,11 +1760,11 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 		"title":      titleCase,
 		"lower":      strings.ToLower,
 		"upper":      strings.ToUpper,
-		"trim":       func(v any, cutset string) string { return strings.Trim(fmt.Sprintf("%v", v), cutset) },
-		"trimLeft":   func(v any, cutset string) string { return strings.TrimLeft(fmt.Sprintf("%v", v), cutset) },
-		"trimRight":  func(v any, cutset string) string { return strings.TrimRight(fmt.Sprintf("%v", v), cutset) },
-		"trimPrefix": func(v any, prefix string) string { return strings.TrimPrefix(fmt.Sprintf("%v", v), prefix) },
-		"trimSuffix": func(v any, suffix string) string { return strings.TrimSuffix(fmt.Sprintf("%v", v), suffix) },
+		"trim":       func(v any, cutset string) string { return strings.Trim(anyToStr(v), cutset) },
+		"trimLeft":   func(v any, cutset string) string { return strings.TrimLeft(anyToStr(v), cutset) },
+		"trimRight":  func(v any, cutset string) string { return strings.TrimRight(anyToStr(v), cutset) },
+		"trimPrefix": func(v any, prefix string) string { return strings.TrimPrefix(anyToStr(v), prefix) },
+		"trimSuffix": func(v any, suffix string) string { return strings.TrimSuffix(anyToStr(v), suffix) },
 		"replace": func(s, old, newStr string) string {
 			return strings.ReplaceAll(s, old, newStr)
 		},
@@ -1773,8 +1831,10 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 		"join": func(sep string, ss []string) string {
 			return strings.Join(ss, sep)
 		},
-		"truncate": truncateWords,
-		"plainify": plainify,
+		"truncate":   func(maxLen int, s any) string { return truncateWords(maxLen, anyToStr(s)) },
+		"plainify":   plainify,
+		"countwords": func(v any) int { return len(strings.Fields(fmt.Sprintf("%v", v))) },
+		"countrunes": func(v any) int { return len([]rune(fmt.Sprintf("%v", v))) },
 		"substr": func(s any, start any, args ...any) string {
 			str := fmt.Sprintf("%v", s)
 			runes := []rune(str)
@@ -1809,12 +1869,12 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 		},
 		"getenv": os.Getenv,
 
-		// strings.* namespace (dot-notation names)
-		"stringsContains":   strings.Contains,
-		"stringsHasPrefix":  strings.HasPrefix,
-		"stringsHasSuffix":  strings.HasSuffix,
-		"stringsTrimPrefix": strings.TrimPrefix,
-		"stringsTrimSuffix": strings.TrimSuffix,
+		// strings.* namespace (dot-notation names) — accept any to handle nil dict values
+		"stringsContains":   func(v, sub any) bool    { return strings.Contains(anyToStr(v), anyToStr(sub)) },
+		"stringsHasPrefix":  func(v, prefix any) bool { return strings.HasPrefix(anyToStr(v), anyToStr(prefix)) },
+		"stringsHasSuffix":  func(v, suffix any) bool { return strings.HasSuffix(anyToStr(v), anyToStr(suffix)) },
+		"stringsTrimPrefix": func(v, prefix any) string { return strings.TrimPrefix(anyToStr(v), anyToStr(prefix)) },
+		"stringsTrimSuffix": func(v, suffix any) string { return strings.TrimSuffix(anyToStr(v), anyToStr(suffix)) },
 
 		// printf alias
 		"printf": fmt.Sprintf,
@@ -1871,7 +1931,14 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 			return fmt.Sprintf("%v", t)
 		},
 		"now": time.Now,
-		"time": func() *timeNamespace { return &timeNamespace{} },
+		// time() returns the namespace; time(v) converts v to HugoTime (for datetime attrs).
+		"time": func(args ...any) any {
+			if len(args) == 0 {
+				return &timeNamespace{}
+			}
+			ht := newHugoTimeFromAny(args[0])
+			return ht
+		},
 
 		// Math
 		"div": func(a, b int) int {
@@ -2106,19 +2173,9 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 	}
 
 	// Hugo Pipes standalone functions (for pipeline syntax: {{ $r | toCSS }})
-	fm["toCSS"] = func(r *stubResource, opts ...any) *stubResource {
-		if r == nil {
-			return &stubResource{}
-		}
-		return r
-	}
-	fm["minify"] = func(r *stubResource) *stubResource {
-		if r == nil {
-			return &stubResource{}
-		}
-		return r
-	}
-	fm["fingerprint"] = func(args ...any) *stubResource {
+	// Resource pipeline functions are variadic to handle pipeline-last arg order:
+	// `resource | toCSS $opts` calls toCSS($opts, resource) in Go templates.
+	extractStubResource := func(args []any) *stubResource {
 		for _, a := range args {
 			if sr, ok := a.(*stubResource); ok {
 				return sr
@@ -2126,18 +2183,12 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 		}
 		return &stubResource{}
 	}
-	fm["postCSS"] = func(r *stubResource, opts ...any) *stubResource {
-		if r == nil {
-			return &stubResource{}
-		}
-		return r
-	}
-	fm["babel"] = func(r *stubResource, opts ...any) *stubResource {
-		if r == nil {
-			return &stubResource{}
-		}
-		return r
-	}
+	fm["toCSS"] = func(args ...any) *stubResource   { return extractStubResource(args) }
+	fm["minify"] = func(args ...any) *stubResource  { return extractStubResource(args) }
+	fm["postCSS"] = func(args ...any) *stubResource { return extractStubResource(args) }
+	fm["babel"] = func(args ...any) *stubResource   { return extractStubResource(args) }
+	fm["fingerprint"] = func(args ...any) *stubResource { return extractStubResource(args) }
+	fm["js"] = func() *jsNamespace { return &jsNamespace{} }
 
 	// partial: load and render a partial template
 	fm["partial"] = func(name string, args ...any) (any, error) {
@@ -2240,6 +2291,38 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 			item := ir.Index(i).Interface()
 			if !exclude[item] {
 				result = reflect.Append(result, ir.Index(i))
+			}
+		}
+		return result.Interface()
+	}
+
+	// symdiff returns the symmetric difference: elements in either collection but not both.
+	fm["symdiff"] = func(a, b any) any {
+		ra := reflect.ValueOf(a)
+		rb := reflect.ValueOf(b)
+		if !ra.IsValid() || (ra.Kind() != reflect.Slice && ra.Kind() != reflect.Array) {
+			return b
+		}
+		if !rb.IsValid() || (rb.Kind() != reflect.Slice && rb.Kind() != reflect.Array) {
+			return a
+		}
+		inA := make(map[any]bool)
+		for i := 0; i < ra.Len(); i++ {
+			inA[ra.Index(i).Interface()] = true
+		}
+		inB := make(map[any]bool)
+		for i := 0; i < rb.Len(); i++ {
+			inB[rb.Index(i).Interface()] = true
+		}
+		result := reflect.MakeSlice(ra.Type(), 0, ra.Len())
+		for i := 0; i < ra.Len(); i++ {
+			if !inB[ra.Index(i).Interface()] {
+				result = reflect.Append(result, ra.Index(i))
+			}
+		}
+		for i := 0; i < rb.Len(); i++ {
+			if !inA[rb.Index(i).Interface()] {
+				result = reflect.Append(result, rb.Index(i))
 			}
 		}
 		return result.Interface()
@@ -2576,11 +2659,17 @@ func (tn *timeNamespace) AsTime(v any, args ...any) time.Time {
 
 type pathNamespace struct{}
 
-func (pn *pathNamespace) Join(elems ...string) string  { return filepath.Join(elems...) }
-func (pn *pathNamespace) Base(p string) string         { return filepath.Base(p) }
-func (pn *pathNamespace) Dir(p string) string          { return filepath.Dir(p) }
-func (pn *pathNamespace) Ext(p string) string          { return filepath.Ext(p) }
-func (pn *pathNamespace) Clean(p string) string        { return filepath.Clean(p) }
+func (pn *pathNamespace) Join(elems ...any) string {
+	parts := make([]string, 0, len(elems))
+	for _, e := range elems {
+		parts = append(parts, anyToStr(e))
+	}
+	return filepath.Join(parts...)
+}
+func (pn *pathNamespace) Base(p any) string         { return filepath.Base(anyToStr(p)) }
+func (pn *pathNamespace) Dir(p any) string          { return filepath.Dir(anyToStr(p)) }
+func (pn *pathNamespace) Ext(p any) string          { return filepath.Ext(anyToStr(p)) }
+func (pn *pathNamespace) Clean(p any) string        { return filepath.Clean(anyToStr(p)) }
 
 // reflectNamespace implements the `reflect` template namespace.
 type reflectNamespace struct{}
@@ -3325,19 +3414,19 @@ func (sn *safeNamespace) HTMLAttr(v any) template.HTMLAttr {
 // stringsNamespace implements Hugo's `strings` namespace.
 type stringsNamespace struct{}
 
-func (sn *stringsNamespace) Contains(s, substr string) bool        { return strings.Contains(s, substr) }
-func (sn *stringsNamespace) ContainsAny(s, chars string) bool      { return strings.ContainsAny(s, chars) }
-func (sn *stringsNamespace) HasPrefix(s, prefix string) bool       { return strings.HasPrefix(s, prefix) }
-func (sn *stringsNamespace) HasSuffix(s, suffix string) bool       { return strings.HasSuffix(s, suffix) }
-func (sn *stringsNamespace) TrimPrefix(s, prefix string) string    { return strings.TrimPrefix(s, prefix) }
-func (sn *stringsNamespace) TrimSuffix(s, suffix string) string    { return strings.TrimSuffix(s, suffix) }
-func (sn *stringsNamespace) TrimSpace(s string) string             { return strings.TrimSpace(s) }
-func (sn *stringsNamespace) Trim(s, cutset string) string          { return strings.Trim(s, cutset) }
-func (sn *stringsNamespace) ToLower(s string) string               { return strings.ToLower(s) }
-func (sn *stringsNamespace) ToUpper(s string) string               { return strings.ToUpper(s) }
-func (sn *stringsNamespace) Title(s string) string                 { return titleCase(s) }
-func (sn *stringsNamespace) Count(s, substr string) int            { return strings.Count(s, substr) }
-func (sn *stringsNamespace) Replace(s, old, new string) string     { return strings.ReplaceAll(s, old, new) }
+func (sn *stringsNamespace) Contains(s, substr any) bool    { return strings.Contains(anyToStr(s), anyToStr(substr)) }
+func (sn *stringsNamespace) ContainsAny(s, chars any) bool  { return strings.ContainsAny(anyToStr(s), anyToStr(chars)) }
+func (sn *stringsNamespace) HasPrefix(s, prefix any) bool   { return strings.HasPrefix(anyToStr(s), anyToStr(prefix)) }
+func (sn *stringsNamespace) HasSuffix(s, suffix any) bool   { return strings.HasSuffix(anyToStr(s), anyToStr(suffix)) }
+func (sn *stringsNamespace) TrimPrefix(s, prefix any) string { return strings.TrimPrefix(anyToStr(s), anyToStr(prefix)) }
+func (sn *stringsNamespace) TrimSuffix(s, suffix any) string { return strings.TrimSuffix(anyToStr(s), anyToStr(suffix)) }
+func (sn *stringsNamespace) TrimSpace(s any) string         { return strings.TrimSpace(anyToStr(s)) }
+func (sn *stringsNamespace) Trim(s, cutset any) string      { return strings.Trim(anyToStr(s), anyToStr(cutset)) }
+func (sn *stringsNamespace) ToLower(s any) string           { return strings.ToLower(anyToStr(s)) }
+func (sn *stringsNamespace) ToUpper(s any) string           { return strings.ToUpper(anyToStr(s)) }
+func (sn *stringsNamespace) Title(s any) string             { return titleCase(anyToStr(s)) }
+func (sn *stringsNamespace) Count(s, substr any) int        { return strings.Count(anyToStr(s), anyToStr(substr)) }
+func (sn *stringsNamespace) Replace(s, old, new any) string { return strings.ReplaceAll(anyToStr(s), anyToStr(old), anyToStr(new)) }
 func (sn *stringsNamespace) ReplaceRE(pattern, repl, s string) string {
 	re, err := regexp.Compile(pattern)
 	if err != nil {
@@ -3345,10 +3434,10 @@ func (sn *stringsNamespace) ReplaceRE(pattern, repl, s string) string {
 	}
 	return re.ReplaceAllString(s, repl)
 }
-func (sn *stringsNamespace) Split(s, sep string) []string  { return strings.Split(s, sep) }
+func (sn *stringsNamespace) Split(s, sep any) []string { return strings.Split(anyToStr(s), anyToStr(sep)) }
 func (sn *stringsNamespace) Join(elems []string, sep string) string { return strings.Join(elems, sep) }
-func (sn *stringsNamespace) Repeat(s string, count int) string { return strings.Repeat(s, count) }
-func (sn *stringsNamespace) Index(s, substr string) int { return strings.Index(s, substr) }
+func (sn *stringsNamespace) Repeat(s any, count int) string { return strings.Repeat(anyToStr(s), count) }
+func (sn *stringsNamespace) Index(s, substr any) int { return strings.Index(anyToStr(s), anyToStr(substr)) }
 func (sn *stringsNamespace) Truncate(n int, s string) string {
 	return truncateWords(n, s)
 }
@@ -3457,16 +3546,34 @@ type partialReturn struct{ value any }
 // We rewrite it to `{{ return (cond X Y) }}` to make the expression evaluate correctly.
 var returnNoParenRe = regexp.MustCompile(`(\{\{[-\s]*)return\s+([^(\s}][^}]*?)([-\s]*\}\})`)
 
-// preprocessTemplate rewrites `{{ return funcname args }}` to `{{ return (funcname args) }}`
-// so that Hugo's partial-return pattern works with our function-based implementation.
+// templatePartialsRe rewrites Hugo's `{{ template "partials/X" . }}` to `{{ partial "X" . }}`
+// so that missing partials are handled gracefully via our partial system.
+var templatePartialsRe = regexp.MustCompile(`\{\{-?\s*template\s+"partials/([^"]+)"\s*(.*?)\s*-?\}\}`)
+
+// preprocessTemplate rewrites Hugo template patterns for tago compatibility:
+// - `{{ return funcname args }}` → `{{ return (funcname args) }}`
+// - `{{ template "partials/X" . }}` → `{{ partial "X" . }}`
 func preprocessTemplate(src string) string {
-	return returnNoParenRe.ReplaceAllStringFunc(src, func(m string) string {
+	src = returnNoParenRe.ReplaceAllStringFunc(src, func(m string) string {
 		sub := returnNoParenRe.FindStringSubmatch(m)
 		if sub == nil {
 			return m
 		}
 		return sub[1] + "return (" + strings.TrimSpace(sub[2]) + ")" + sub[3]
 	})
+	src = templatePartialsRe.ReplaceAllStringFunc(src, func(m string) string {
+		sub := templatePartialsRe.FindStringSubmatch(m)
+		if sub == nil {
+			return m
+		}
+		name := sub[1]
+		ctx := strings.TrimSpace(sub[2])
+		if ctx == "" {
+			ctx = "."
+		}
+		return `{{ partial "` + name + `" ` + ctx + ` }}`
+	})
+	return src
 }
 
 func (r *Renderer) renderPartial(name string, ctx any) (template.HTML, error) {
@@ -3761,7 +3868,7 @@ func (r *Renderer) getTemplateFor(kind, pageType, layout, section, lang string) 
 	}
 
 	// kind template — its {{define}} blocks override baseof's {{block}} defaults.
-	if _, err2 := t.Parse(kindTmpl); err2 != nil {
+	if _, err2 := t.Parse(preprocessTemplate(kindTmpl)); err2 != nil {
 		return nil, fmt.Errorf("parse template %q kind: %w", kind, err2)
 	}
 

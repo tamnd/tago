@@ -58,7 +58,7 @@ func TestFuncFirst(t *testing.T) {
 	pages := []*content.Page{{Title: "A"}, {Title: "B"}, {Title: "C"}}
 	r := makeRenderer(t)
 	fm := r.buildFuncMap()
-	firstFn := fm["first"].(func(int, any) any)
+	firstFn := fm["first"].(func(any, any) any)
 
 	result := firstFn(2, pages).([]*content.Page)
 	if len(result) != 2 {
@@ -69,7 +69,7 @@ func TestFuncFirst(t *testing.T) {
 	}
 
 	// first with n > len should return all
-	all := firstFn(10, pages).([]*content.Page)
+	all := firstFn(10, pages).([]*content.Page) //nolint
 	if len(all) != 3 {
 		t.Errorf("first(10) of 3: got %d, want 3", len(all))
 	}
@@ -79,7 +79,7 @@ func TestFuncLast(t *testing.T) {
 	pages := []*content.Page{{Title: "A"}, {Title: "B"}, {Title: "C"}}
 	r := makeRenderer(t)
 	fm := r.buildFuncMap()
-	lastFn := fm["last"].(func(int, any) any)
+	lastFn := fm["last"].(func(any, any) any)
 
 	result := lastFn(2, pages).([]*content.Page)
 	if len(result) != 2 {
@@ -210,7 +210,7 @@ func TestFuncIn(t *testing.T) {
 func TestFuncTruncate(t *testing.T) {
 	r := makeRenderer(t)
 	fm := r.buildFuncMap()
-	truncFn := fm["truncate"].(func(int, string) string)
+	truncFn := fm["truncate"].(func(int, any) string)
 
 	long := "This is a very long sentence with many words in it yes."
 	got := truncFn(20, long)
