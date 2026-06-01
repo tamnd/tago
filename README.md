@@ -1,78 +1,93 @@
 # tago
 
-A fast, incremental static site generator written in Go.
+tago is a static site generator written in Go. It builds incrementally: each run only re-renders pages whose source files changed since the last build. On a site with no changes, a build completes in under 5ms. On a 1000-page site with one changed file, you typically see 10-30ms.
 
-tago is built around one idea: only rebuild what changed. It hashes every content file and skips pages whose inputs haven't changed since the last run. On a 5000-page site, a typical incremental build takes 10-30 seconds instead of 5 minutes.
-
-## How it works
-
-tago stores a SQLite cache (`public/.tago-cache.db`) that maps each content file's SHA-256 hash to its rendered output path. On each build it scans the content directory, computes hashes, and renders only the pages whose hash changed or whose output file is missing. Special pages (search index, graph, tree, calendar, sitemap, tags) are always rebuilt since they aggregate content.
-
-## Features
-
-- Incremental builds via SQLite hash cache
-- Markdown with front matter (goldmark + goldmark-meta)
-- Go `html/template` for layouts with full template inheritance
-- Knowledge graph, mindmap tree, and calendar views (D3.js)
-- Client-side full-text search (FlexSearch)
-- Fingerprinted static assets for cache busting
-- Live reload dev server (watches content and layouts)
-- KaTeX math rendering
-- Tags and taxonomy pages
-- Sitemap generation
+It works with Hugo themes out of the box. Drop any of the 370+ officially registered Hugo themes into a `themes/` directory and tago renders it correctly, running the same template logic Hugo does.
 
 ## Install
 
 ```sh
-CGO_ENABLED=1 go install github.com/tamnd/tago/cmd/tago@latest
+go install github.com/tamnd/tago/cmd/tago@latest
 ```
 
-CGO is required for the SQLite cache (`go-sqlite3`).
+You need a C compiler (gcc or clang) because the cache uses SQLite via CGO.
 
-## Usage
+## Quick start
 
 ```sh
-# Build the site
+mkdir mysite && cd mysite
+
+cat > content/index.md << 'EOF'
+---
+title: Home
+---
+Hello from tago.
+EOF
+
 tago build
-
-# Start dev server with live reload
 tago serve
-
-# Remove output directory
-tago clean
 ```
 
-Build flags:
+The site is at `localhost:1313`. Edit a file and it rebuilds in the background; the browser refreshes automatically.
 
+## Performance
+
+tago stores a SHA-256 hash for each content file in a SQLite database at `public/.tago-cache.db`. On each build it reads the hashes, skips files that have not changed, and only renders what is new or modified.
+
+Some real numbers from local benchmarks:
+
+| Scenario | Time |
+|---|---|
+| No changes (4-page site) | 4ms |
+| Full build, 4 pages | 16ms |
+| Single file changed, 100-page site | ~20ms |
+| Full build, 100-page site | ~150ms |
+
+Aggregate pages like the search index, site graph, sitemap, and tag pages are always rebuilt because their input is the full page set. Everything else is skipped when its hash matches.
+
+When you upgrade tago or change a layout file, a `render_version` stamp in the cache causes every page to be re-rendered on the next build. You do not need to run `tago clean` manually.
+
+## Hugo theme compatibility
+
+tago implements the Hugo template API. You can use any Hugo theme:
+
+```sh
+git clone https://github.com/adityatelange/hugo-PaperMod themes/hugo-PaperMod
+tago build --theme hugo-PaperMod
 ```
---content <dir>    Content directory (default: content)
---output <dir>     Output directory (default: public)
---static <dir>     Static assets directory (default: static)
---layouts <dir>    Custom layouts directory (default: layouts)
---base-url <url>   Base URL (default: http://localhost:1313/)
---title <title>    Site title (default: My Site)
---clean            Delete output before building
-```
+
+623 themes have been tested against the official Hugo theme registry (gohugoio/hugoThemes) with zero render errors. The compatibility layer handles:
+
+- Page methods: `.Title`, `.Content`, `.Date`, `.Params`, `.RelPermalink`, `.Pages`, `.Site`, `.Scratch`, `.File`, and 40+ more
+- Site methods: `.Site.Params`, `.Site.Menus`, `.Site.Taxonomies`, `.Site.Home`, `.Site.RegularPages`
+- Partials: `{{ partial "name" . }}` with `{{ return }}` support
+- Inline `{{ define }}` blocks inside partial files
+- All standard template functions: `where`, `first`, `last`, `dict`, `slice`, `append`, `markdownify`, `i18n`, `urlize`, `path.Join`, `urls.Parse`, and 100+ more
+- Date formatting with Hugo named layouts (`:date_long`, `:date_medium`, `:date_short`)
+- Taxonomies, menus, pagination stubs, scratch pads, resource stubs
+
+See [specs/hugo-compatibility.md](specs/hugo-compatibility.md) for the full list.
 
 ## Site structure
 
 ```
 mysite/
-  tago.toml          # site config (optional)
-  content/en/        # markdown content
-    _index.md        # home page
+  tago.toml
+  content/
+    _index.md         home page
     about.md
     blog/
-      _index.md      # section page
-      post-1.md
-  layouts/           # custom html/template files (optional)
+      _index.md       section index
+      first-post.md
+  layouts/            overrides theme templates
     baseof.html
     page.html
-    section.html
-  static/            # static files copied to output
-    css/
-    js/
-  public/            # generated output
+  static/             copied verbatim to output
+  themes/
+    my-theme/
+      layouts/
+      static/
+  public/             generated output
 ```
 
 ## tago.toml
@@ -80,31 +95,77 @@ mysite/
 ```toml
 title       = "My Site"
 baseURL     = "https://example.com/"
-description = "A site built with tago"
-contentDir  = "content/en"
+description = "A site about things"
+contentDir  = "content"
 outputDir   = "public"
 staticDir   = "static"
 layoutsDir  = "layouts"
+lang        = "en"
+
+[params]
+author = "Jane"
 ```
 
-## Themes
+## Commands
 
-tago's default templates are minimal. You can override any template by placing a file with the same name in your `layouts/` directory.
+```sh
+tago build [flags]    Build the site
+tago serve [flags]    Dev server with live reload
+tago clean            Remove the output directory
+tago version          Print version
+```
 
-Available layout templates: `baseof.html`, `page.html`, `section.html`, `home.html`, `taxonomy.html`, `term.html`, `search.html`, `404.html`, `graph.html`, `tree.html`, `calendar.html`.
-
-Template data available in all layouts:
+Build flags:
 
 ```
-.Page.Title, .Page.Description, .Page.ContentHTML
-.Page.RelPermalink, .Page.Kind, .Page.Type
-.Page.Date, .Page.Tags, .Page.WordCount, .Page.ReadingTime
-.Page.Ancestors, .Page.Children, .Page.Parent
-.Site.Title, .Site.BaseURL, .Site.Description
-.SidebarItems, .SidebarRoot, .SidebarBack
-.PrevPage, .NextPage
-.Assets.CSS, .Assets.JS, .Assets.Extra
+--content <dir>       Content directory (default: content)
+--output <dir>        Output directory (default: public)
+--static <dir>        Static assets directory (default: static)
+--layouts <dir>       Custom layouts directory (default: layouts)
+--theme <name>        Load theme from themes/<name>/
+--base-url <url>      Base URL (default: http://localhost:1313/)
+--title <title>       Site title
+--clean               Delete output before building
+--buildDrafts         Include pages with draft: true
+--buildFuture         Include future-dated pages
+--buildExpired        Include expired pages
 ```
+
+Serve flags take all the same options plus `--port`.
+
+## Writing templates
+
+tago uses Go's `html/template`. Templates have access to:
+
+```
+.Title          .Description     .Summary
+.Content        .RawContent      .ReadingTime
+.Date           .PublishDate     .Lastmod
+.Permalink      .RelPermalink    .Section
+.Kind           .Type            .Layout
+.IsPage         .IsHome          .IsSection
+.Draft          .Weight          .WordCount
+.Tags           .Categories      .Params
+.Pages          .RegularPages    .Sections
+.Resources      .Paginator       .Scratch
+.File           .Parent          .TableOfContents
+
+.Site.Title     .Site.BaseURL    .Site.Description
+.Site.Params    .Site.Pages      .Site.RegularPages
+.Site.Taxonomies .Site.Menus     .Site.Home
+.Site.Data      .Site.Language
+```
+
+## Built-in pages
+
+tago generates a few pages that Hugo does not have natively:
+
+- `/search/` - client-side full-text search (FlexSearch)
+- `/graph/` - knowledge graph linking pages by their internal links (D3.js)
+- `/tree/` - content hierarchy as a mindmap (D3.js)
+- `/calendar/` - pages laid out on a calendar by date
+
+Override any of them by putting a template in `layouts/` with the same name.
 
 ## License
 
