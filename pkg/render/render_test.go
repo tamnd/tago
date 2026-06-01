@@ -615,3 +615,327 @@ func TestTimeNamespaceFormat(t *testing.T) {
 		t.Errorf("time.Format HugoTime = %s, want March 15, 2024", result2)
 	}
 }
+
+// --- Hugo compatibility integration tests ---
+
+// renderTmpl is declared but unused; kept as a helper for future tests.
+var _ = func(t *testing.T, r *Renderer, tmplStr string, ctx any) string {
+	return tmplStr
+}
+
+// TestHugoCompatStringsFuncs checks strings namespace: HasPrefix, HasSuffix, Contains, TrimSpace, ToLower, etc.
+func TestHugoCompatStringsFuncs(t *testing.T) {
+	r := makeRenderer(t)
+	fm := r.buildFuncMap()
+	sn := fm["strings"].(func() *stringsNamespace)()
+
+	if !sn.HasPrefix("foobar", "foo") {
+		t.Error("strings.HasPrefix(foobar, foo) should be true")
+	}
+	if sn.HasPrefix("foobar", "bar") {
+		t.Error("strings.HasPrefix(foobar, bar) should be false")
+	}
+	if !sn.HasSuffix("foobar", "bar") {
+		t.Error("strings.HasSuffix(foobar, bar) should be true")
+	}
+	if !sn.Contains("hello world", "world") {
+		t.Error("strings.Contains(hello world, world) should be true")
+	}
+	// nil input via anyToStr
+	if sn.Contains(nil, "x") {
+		t.Error("strings.Contains(nil, x) should be false")
+	}
+	if sn.HasPrefix(nil, "x") {
+		t.Error("strings.HasPrefix(nil, x) should be false")
+	}
+	if sn.TrimLeft(".", ".hello") != "hello" {
+		t.Errorf("strings.TrimLeft unexpected: %q", sn.TrimLeft(".", ".hello"))
+	}
+	if sn.TrimRight(".", "hello.") != "hello" {
+		t.Errorf("strings.TrimRight unexpected: %q", sn.TrimRight(".", "hello."))
+	}
+}
+
+// TestHugoCompatMathFuncs checks arithmetic with any types (int, float, nil, string-int).
+func TestHugoCompatMathFuncs(t *testing.T) {
+	r := makeRenderer(t)
+	fm := r.buildFuncMap()
+
+	add := fm["add"].(func(any, any) any)
+	sub := fm["sub"].(func(any, any) any)
+	mul := fm["mul"].(func(any, any) any)
+	div := fm["div"].(func(any, any) any)
+
+	if add(3, 4) != 7 {
+		t.Errorf("add(3,4) = %v, want 7", add(3, 4))
+	}
+	if sub(10, 3) != 7 {
+		t.Errorf("sub(10,3) = %v, want 7", sub(10, 3))
+	}
+	if mul(3, 4) != 12 {
+		t.Errorf("mul(3,4) = %v, want 12", mul(3, 4))
+	}
+	if div(10, 2) != 5 {
+		t.Errorf("div(10,2) = %v, want 5", div(10, 2))
+	}
+	// nil args should not panic and return zero
+	divResult := div(nil, nil)
+	if divResult != 0 && divResult != float64(0) && divResult != int(0) {
+		t.Errorf("div(nil,nil) = %v (%T), want 0", divResult, divResult)
+	}
+	// interface{} int (from Scratch.Get)
+	var v any = 5
+	if add(v, 3) != 8 {
+		t.Errorf("add(any(5), 3) = %v, want 8", add(v, 3))
+	}
+}
+
+// TestHugoCompatSliceAndAppend tests hugoSlice behavior.
+func TestHugoCompatSliceAndAppend(t *testing.T) {
+	r := makeRenderer(t)
+	fm := r.buildFuncMap()
+	sliceFn := fm["slice"].(func(...any) hugoSlice)
+	appendFn := fm["append"].(func(any, ...any) hugoSlice)
+
+	s := sliceFn("a", "b", "c")
+	if len(s) != 3 {
+		t.Errorf("slice len = %d, want 3", len(s))
+	}
+	rev := s.Reverse()
+	if rev[0] != "c" || rev[2] != "a" {
+		t.Errorf("slice.Reverse = %v, want [c b a]", rev)
+	}
+	s2 := appendFn(s, "d")
+	if len(s2) != 4 || s2[3] != "d" {
+		t.Errorf("append = %v, want [a b c d]", s2)
+	}
+}
+
+// TestHugoCompatSafePageRef tests that safePageRef methods are nil-safe.
+func TestHugoCompatSafePageRef(t *testing.T) {
+	nilRef := &safePageRef{page: nil}
+	if nilRef.RelPermalink() != "" {
+		t.Error("safePageRef nil: RelPermalink should be empty")
+	}
+	if nilRef.Title() != "" {
+		t.Error("safePageRef nil: Title should be empty")
+	}
+	if nilRef.Layout() != "" {
+		t.Error("safePageRef nil: Layout should be empty")
+	}
+
+	page := &content.Page{
+		RelPermalink: "/posts/hello/",
+		Title:        "Hello World",
+		Layout:       "single",
+	}
+	ref := &safePageRef{page: page}
+	if ref.RelPermalink() != "/posts/hello/" {
+		t.Errorf("safePageRef.RelPermalink = %q, want /posts/hello/", ref.RelPermalink())
+	}
+	if ref.Layout() != "single" {
+		t.Errorf("safePageRef.Layout = %q, want single", ref.Layout())
+	}
+}
+
+// TestHugoCompatResourcesRangeable ensures Resources() returns a type rangeable in templates.
+func TestHugoCompatResourcesRangeable(t *testing.T) {
+	page := &content.Page{Title: "Test", RelPermalink: "/test/"}
+	site := makeSite()
+	hp := &HugoPage{Page: page, Site: site}
+
+	res := hp.Resources()
+	// Should be nil (falsy), not panic in range
+	if res != nil {
+		t.Errorf("HugoPage.Resources() should be nil, got %v", res)
+	}
+	// Ensure ByType and Match return nil (rangeable in template range)
+	if res.ByType("image") != nil {
+		t.Error("nil stubResourceSlice.ByType should return nil")
+	}
+	if res.Match("*") != nil {
+		t.Error("nil stubResourceSlice.Match should return nil")
+	}
+}
+
+// TestHugoCompatTermEntryPages tests that TermEntry has Pages() method.
+func TestHugoCompatTermEntryPages(t *testing.T) {
+	entry := TermEntry{Name: "go", Count: 5, Term: "go"}
+	pages := entry.Pages()
+	if pages != nil {
+		t.Errorf("TermEntry.Pages() should be nil, got %v", pages)
+	}
+}
+
+// TestHugoCompatSiteHomeStubPage tests siteHomeStub.Page() returns itself.
+func TestHugoCompatSiteHomeStubPage(t *testing.T) {
+	stub := &siteHomeStub{baseURL: "http://example.com/"}
+	p := stub.Page()
+	if p != stub {
+		t.Error("siteHomeStub.Page() should return self")
+	}
+	if stub.Resources() != nil {
+		t.Error("siteHomeStub.Resources() should be nil")
+	}
+}
+
+// TestHugoCompatFormatDate checks formatDate accepts both time.Time and HugoTime.
+func TestHugoCompatFormatDate(t *testing.T) {
+	r := makeRenderer(t)
+	fm := r.buildFuncMap()
+	fd := fm["formatDate"].(func(any) string)
+
+	ts := time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC)
+	result := fd(ts)
+	if !strings.Contains(result, "2024") {
+		t.Errorf("formatDate(time.Time) = %q, should contain 2024", result)
+	}
+	result2 := fd(HugoTime{ts})
+	if !strings.Contains(result2, "2024") {
+		t.Errorf("formatDate(HugoTime) = %q, should contain 2024", result2)
+	}
+	// nil should not panic
+	result3 := fd(nil)
+	if result3 != "" {
+		t.Errorf("formatDate(nil) = %q, want empty", result3)
+	}
+}
+
+// TestHugoCompatHugoSliceReverse tests hugoSlice.Reverse on empty and non-empty slices.
+func TestHugoCompatHugoSliceReverse(t *testing.T) {
+	var empty hugoSlice
+	rev := empty.Reverse()
+	if len(rev) != 0 {
+		t.Errorf("empty.Reverse() len = %d, want 0", len(rev))
+	}
+
+	s := hugoSlice{1, 2, 3}
+	rev = s.Reverse()
+	if rev[0] != 3 || rev[1] != 2 || rev[2] != 1 {
+		t.Errorf("Reverse = %v, want [3 2 1]", rev)
+	}
+}
+
+// TestHugoCompatPrintfNilFormat checks printf does not panic on nil format.
+func TestHugoCompatPrintfNilFormat(t *testing.T) {
+	r := makeRenderer(t)
+	fm := r.buildFuncMap()
+	pf := fm["printf"].(func(any, ...any) string)
+
+	result := pf(nil)
+	if result != "" {
+		t.Errorf("printf(nil) = %q, want empty", result)
+	}
+	result2 := pf("hello %s", "world")
+	if result2 != "hello world" {
+		t.Errorf("printf(hello %%s, world) = %q, want 'hello world'", result2)
+	}
+}
+
+// TestHugoCompatReplaceAcceptsNil checks replace does not panic with nil inputs.
+func TestHugoCompatReplaceAcceptsNil(t *testing.T) {
+	r := makeRenderer(t)
+	fm := r.buildFuncMap()
+	replaceFn := fm["replace"].(func(any, any, any) string)
+
+	if got := replaceFn(nil, "a", "b"); got != "" {
+		t.Errorf("replace(nil, a, b) = %q, want empty", got)
+	}
+	if got := replaceFn("hello", nil, "world"); got != "hello" {
+		t.Errorf("replace(hello, nil, world) = %q, want hello", got)
+	}
+	if got := replaceFn("hello", "hello", nil); got != "" {
+		t.Errorf("replace(hello, hello, nil) = %q, want empty", got)
+	}
+}
+
+// TestHugoCompatSlicestr tests the slicestr function.
+func TestHugoCompatSlicestr(t *testing.T) {
+	r := makeRenderer(t)
+	fm := r.buildFuncMap()
+	slicestrFn := fm["slicestr"].(func(any, any, ...any) string)
+
+	if got := slicestrFn("Hello World", 0, 5); got != "Hello" {
+		t.Errorf("slicestr(Hello World, 0, 5) = %q, want Hello", got)
+	}
+	if got := slicestrFn("Hello", 2); got != "llo" {
+		t.Errorf("slicestr(Hello, 2) = %q, want llo", got)
+	}
+}
+
+// TestHugoCompatSiteDataGetPage checks .Site.GetPage returns a siteHomeStub.
+func TestHugoCompatSiteDataGetPage(t *testing.T) {
+	site := makeSite()
+	result := site.GetPage("homepage")
+	if result == nil {
+		t.Error("Site.GetPage should not return nil")
+	}
+	if result.IsHome() != true {
+		t.Error("Site.GetPage('homepage').IsHome() should be true")
+	}
+}
+
+// TestHugoCompatReflectIsSliceNilSafe tests that reflect.IsSlice does not panic on nil.
+func TestHugoCompatReflectIsSliceNilSafe(t *testing.T) {
+	rn := &reflectNamespace{}
+	// nil should not panic
+	if rn.IsSlice(nil) {
+		t.Error("reflect.IsSlice(nil) should be false")
+	}
+	if !rn.IsSlice([]string{"a"}) {
+		t.Error("reflect.IsSlice([]string) should be true")
+	}
+	if rn.IsSlice("string") {
+		t.Error("reflect.IsSlice(string) should be false")
+	}
+}
+
+// TestHugoCompatHugoPageList tests HugoPageList methods: Limit, Related, GroupByPublishDate.
+func TestHugoCompatHugoPageList(t *testing.T) {
+	site := makeSite()
+	pages := HugoPageList{
+		{Page: &content.Page{Title: "A"}, Site: site},
+		{Page: &content.Page{Title: "B"}, Site: site},
+		{Page: &content.Page{Title: "C"}, Site: site},
+	}
+
+	limited := pages.Limit(2)
+	if len(limited) != 2 {
+		t.Errorf("Limit(2) len = %d, want 2", len(limited))
+	}
+	related := pages.Related(nil)
+	if related != nil {
+		t.Errorf("Related should return nil, got %v", related)
+	}
+	groups := pages.GroupByPublishDate("2006")
+	_ = groups // just ensure no panic
+	groups2 := pages.GroupByParam("category")
+	_ = groups2
+}
+
+// TestHugoCompatInlineDefine tests that partial calls find inline {{ define }} blocks.
+func TestHugoCompatInlineDefine(t *testing.T) {
+	dir := t.TempDir()
+	layoutsDir := filepath.Join(dir, "layouts")
+	partialsDir := filepath.Join(layoutsDir, "partials")
+	if err := os.MkdirAll(partialsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a partial that has an inline {{ define }} block and calls it.
+	partialSrc := `{{ define "partials/helper" }}{{ return (dict "val" "hello") }}{{ end -}}
+{{- $result := partial "helper" . -}}
+{{- $result.val -}}`
+	if err := os.WriteFile(filepath.Join(partialsDir, "mypartial.html"), []byte(partialSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := makeRendererWithLayouts(t, layoutsDir)
+	out, err := r.renderPartialAny("mypartial", nil)
+	if err != nil {
+		t.Fatalf("renderPartialAny error: %v", err)
+	}
+	if string(out.(template.HTML)) != "hello" {
+		t.Errorf("inline define result = %q, want hello", out)
+	}
+}

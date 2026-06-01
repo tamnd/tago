@@ -1938,7 +1938,12 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 		"trimPrefix": func(v any, prefix string) string { return strings.TrimPrefix(anyToStr(v), prefix) },
 		"trimSuffix": func(v any, suffix string) string { return strings.TrimSuffix(anyToStr(v), suffix) },
 		"replace": func(s, old, newStr any) string {
-			return strings.ReplaceAll(anyToStr(s), anyToStr(old), anyToStr(newStr))
+			src := anyToStr(s)
+			oldStr := anyToStr(old)
+			if oldStr == "" {
+				return src
+			}
+			return strings.ReplaceAll(src, oldStr, anyToStr(newStr))
 		},
 		"findRE": func(pattern string, v any, args ...any) []string {
 			s := fmt.Sprintf("%v", v)
