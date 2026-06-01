@@ -2357,7 +2357,7 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 			reflect.Copy(result, rv)
 			// Fisher-Yates shuffle with hash-based pseudo-random (deterministic for SSG)
 			for i := n - 1; i > 0; i-- {
-				j := (i * 2654435761) % (i + 1)
+				j := int((int64(i) * 2654435761) % int64(i+1))
 				a, b := result.Index(i).Interface(), result.Index(j).Interface()
 				result.Index(i).Set(reflect.ValueOf(b))
 				result.Index(j).Set(reflect.ValueOf(a))
