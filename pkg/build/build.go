@@ -36,6 +36,15 @@ type Config struct {
 	Clean           bool
 	LiveReload      bool
 	SyntaxHighlight bool // enable Chroma server-side highlighting (slower builds)
+
+	// Build filtering (Hugo-compatible)
+	BuildDrafts   bool // --buildDrafts / buildDrafts in config
+	BuildFuture   bool // --buildFuture / buildFuture in config
+	BuildExpired  bool // --buildExpired / buildExpired in config
+
+	// Site-level data exposed to templates
+	Params     map[string]any    // [params] in tago.toml → .Site.Params
+	Taxonomies map[string]string // custom taxonomies: plural → singular
 }
 
 // Stats holds build statistics.
@@ -160,7 +169,8 @@ func Build(cfg *Config) (*Stats, error) {
 				log.Printf("tago: error parsing %s: %v", r.filePath, r.err)
 				continue
 			}
-			permalink, lang := content.PermalinkFromPath(cfg.ContentDir, r.filePath, cfg.DefaultLang)
+			basePermalink, lang := content.PermalinkFromPath(cfg.ContentDir, r.filePath, cfg.DefaultLang)
+			permalink := content.ApplySlugURL(basePermalink, r.page)
 			r.page.RelPermalink = permalink
 			r.page.Lang = lang
 			r.page.OutputPath = content.OutputPathFromPermalink(cfg.OutputDir, permalink)
@@ -211,9 +221,19 @@ func Build(cfg *Config) (*Stats, error) {
 		allPages[filePath] = page
 	}
 
-	// Convert to slice
+	// Convert to slice, applying build filters (draft / future / expired).
+	now := time.Now()
 	var pageSlice []*content.Page
 	for _, p := range allPages {
+		if p.Draft && !cfg.BuildDrafts {
+			continue
+		}
+		if !cfg.BuildFuture && !p.PublishDate.IsZero() && p.PublishDate.After(now) {
+			continue
+		}
+		if !cfg.BuildExpired && !p.ExpiryDate.IsZero() && p.ExpiryDate.Before(now) {
+			continue
+		}
 		pageSlice = append(pageSlice, p)
 	}
 
@@ -306,6 +326,7 @@ func Build(cfg *Config) (*Stats, error) {
 		BaseURL:     cfg.BaseURL,
 		Description: cfg.SiteDesc,
 		EditURLBase: cfg.EditURLBase,
+		Params:      cfg.Params,
 	}
 
 	rAssets := render.AssetRefs{
@@ -557,7 +578,7 @@ func scanMarkdownFiles(contentDir string, statCache map[string]cache.StatEntry) 
 }
 
 // markAncestors marks all ancestor pages (section indexes) as needing re-render.
-func markAncestors(page *content.Page, needsRender map[string]bool, allPages map[string]*content.Page) {
+func markAncestors(page *content.Page, needsRender map[string]bool, _ map[string]*content.Page) {
 	cur := page.Parent
 	for cur != nil {
 		if cur.FilePath != "" {
@@ -633,10 +654,19 @@ func recordToPage(rec *cache.PageRecord, cfg *Config) *content.Page {
 		LinkTitle:     rec.LinkTitle,
 		Description:   rec.Description,
 		Date:          rec.Date,
+		PublishDate:   rec.PublishDate,
+		ExpiryDate:    rec.ExpiryDate,
+		Lastmod:       rec.Lastmod,
 		Tags:          rec.Tags,
+		Categories:    rec.Categories,
+		Keywords:      rec.Keywords,
 		Draft:         rec.Draft,
 		Weight:        rec.Weight,
 		Type:          rec.Type,
+		Layout:        rec.Layout,
+		Slug:          rec.Slug,
+		URL:           rec.URL,
+		Aliases:       rec.Aliases,
 		NoIndex:       rec.NoIndex,
 		ExcludeSearch: rec.ExcludeSearch,
 		Params:        rec.Params,
@@ -692,10 +722,19 @@ func pageToRecord(page *content.Page) *cache.PageRecord {
 		LinkTitle:     page.LinkTitle,
 		Description:   page.Description,
 		Date:          page.Date,
+		PublishDate:   page.PublishDate,
+		ExpiryDate:    page.ExpiryDate,
+		Lastmod:       page.Lastmod,
 		Tags:          page.Tags,
+		Categories:    page.Categories,
+		Keywords:      page.Keywords,
 		Draft:         page.Draft,
 		Weight:        page.Weight,
 		Type:          page.Type,
+		Layout:        page.Layout,
+		Slug:          page.Slug,
+		URL:           page.URL,
+		Aliases:       page.Aliases,
 		NoIndex:       page.NoIndex,
 		ExcludeSearch: page.ExcludeSearch,
 		Params:        page.Params,

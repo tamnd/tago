@@ -23,6 +23,7 @@ type SiteData struct {
 	BaseURL     string
 	Description string
 	EditURLBase string
+	Params      map[string]any // .Site.Params — from [params] in tago.toml
 }
 
 // AssetRefs holds fingerprinted asset URLs.
