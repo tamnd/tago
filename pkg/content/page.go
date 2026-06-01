@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"fmt"
+	"html/template"
 	"io"
 	"math"
 	"os"
@@ -100,6 +101,77 @@ func (p *Page) IsHome() bool { return p.Kind == "home" }
 
 // Path returns the logical path of the page (its RelPermalink).
 func (p *Page) Path() string { return p.RelPermalink }
+
+// PageScratch is a lightweight scratch pad used by content.Page.Store.
+type PageScratch struct {
+	mu   sync.Mutex
+	data map[string]any
+}
+
+func (s *PageScratch) Get(key string) any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data == nil {
+		return nil
+	}
+	return s.data[key]
+}
+
+func (s *PageScratch) Set(key string, val any) string {
+	s.mu.Lock()
+	if s.data == nil {
+		s.data = make(map[string]any)
+	}
+	s.data[key] = val
+	s.mu.Unlock()
+	return ""
+}
+
+func (s *PageScratch) SetInMap(key, mapKey string, val any) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data == nil {
+		s.data = make(map[string]any)
+	}
+	if m, ok := s.data[key].(map[string]any); ok {
+		m[mapKey] = val
+	} else {
+		s.data[key] = map[string]any{mapKey: val}
+	}
+	return ""
+}
+
+func (s *PageScratch) Delete(key string) string {
+	s.mu.Lock()
+	if s.data != nil {
+		delete(s.data, key)
+	}
+	s.mu.Unlock()
+	return ""
+}
+
+// Store returns a per-page scratch pad (Hugo 0.117+).
+func (p *Page) Store() *PageScratch {
+	return &PageScratch{data: make(map[string]any)}
+}
+
+// PageResourcesStub is a minimal stub for page-level resources (image processing etc).
+// The actual resource implementation lives in pkg/render to avoid circular imports,
+// but content.Page needs to expose Resources() for direct template access via .Page.Resources.
+type PageResourcesStub struct{}
+
+func (r *PageResourcesStub) GetMatch(pattern string) any { return nil }
+func (r *PageResourcesStub) Match(pattern string) []any  { return nil }
+func (r *PageResourcesStub) Get(name string) any         { return nil }
+func (r *PageResourcesStub) ByType(t string) []any       { return nil }
+
+// Resources returns a stub resources object for this page.
+func (p *Page) Resources() *PageResourcesStub {
+	return &PageResourcesStub{}
+}
+
+// Content returns the HTML content for direct template access via .Page.Content.
+func (p *Page) Content() template.HTML { return template.HTML(p.ContentHTML) }
 
 // ContentBaseName returns the base name of the content file (without extension).
 func (p *Page) ContentBaseName() string {
