@@ -240,6 +240,44 @@ Also accessed via TermsData on taxonomy pages:
 - Works on `[]*content.Page`, `HugoPageList`, `[]any`
 - Uses `getNestedField` for dot-separated field paths (e.g. "Params.draft")
 
+## Persistent Scratch
+
+`HugoPage.Scratch()` and `TemplateData.Scratch()` cache the Scratch object on
+first call using a private struct field. This means `.Scratch.Set "k" "v"` and
+a subsequent `.Scratch.Get "k"` in the same template execution see the same map.
+The same applies to `.Store()`.
+
+Previously these methods called `newScratch()` on every invocation, so Set in
+one expression and Get in another returned different objects — values were always
+lost. Hugo themes rely on setting scratch values early in a template and reading
+them later (e.g., setting a class name based on page position and referencing it
+in a class attribute).
+
+## HugoTime Named Layouts
+
+`HugoTime.Format(layout)` resolves Hugo's named layout strings before passing to
+`time.Time.Format`. The mapping:
+
+| Named layout | Go format |
+|---|---|
+| `:date_long` | `January 2, 2006` |
+| `:date_medium` | `Jan 2, 2006` |
+| `:date_short` | `01/02/06` |
+| `:time` | `15:04:05` |
+
+Hugo 0.87+ introduced these named layouts matching CLDR long/medium/short date
+formats. Themes use them in front matter: `dateformat: ":date_medium"`.
+
+## seq Variadic Form
+
+Hugo's `seq` accepts 1, 2, or 3 arguments:
+- `seq N` → [1, 2, ..., N]
+- `seq first last` → [first, first+1, ..., last]
+- `seq first incr last` → [first, first+incr, ..., last]
+
+Previous implementation only accepted `seq N` (one int argument). Updated to
+variadic `func(...any) []int` using `toIntDef` helper.
+
 ## Scratch
 
 `Scratch.Add(key, val)` accumulates:
@@ -281,6 +319,13 @@ with a few content pages and checking for zero render errors.
 | 2025-06 | 183 | 183 | Further expansion |
 | 2026-06 | 198 | 198 | Bootstrap, academic-cv, theme-blog, wowchemy |
 | 2026-06 | 250 | 250 | docsy, learn, pickles, casper, soho, and many more |
+| 2026-06 | 305 | 305 | hugoSlice, currentTmplStore, replace guard |
+| 2026-06 | 623 | 623 | All 370 officially registered Hugo themes + duplicates |
+
+623 themes pass. Themes are drawn from the official Hugo themes registry
+(https://github.com/gohugoio/hugoThemes). 10 repositories were not found
+(gone or private). The registry has 370 unique entries; the 623 test count
+includes duplicates used for regression testing.
 
 ## Error Patterns Found in the Wild
 
