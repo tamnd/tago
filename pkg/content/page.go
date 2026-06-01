@@ -29,38 +29,115 @@ import (
 
 // Page represents a single content page or section.
 type Page struct {
-	FilePath     string
-	FileHash     string
-	FileSize     int64
-	FileMtime    int64
+	FilePath  string
+	FileHash  string
+	FileSize  int64
+	FileMtime int64
+
+	// URL fields
 	RelPermalink string
 	OutputPath   string
+	Slug         string   // front matter slug: overrides last URL segment
+	URL          string   // front matter url: overrides entire permalink
+	Aliases      []string // redirect aliases
 
-	Title         string
-	LinkTitle     string
-	Description   string
-	Date          time.Time
-	Tags          []string
-	Draft         bool
-	Weight        int
-	Type          string
+	// Core metadata
+	Title       string
+	LinkTitle   string
+	Description string
+	Summary     string
+	Date        time.Time
+	PublishDate time.Time
+	ExpiryDate  time.Time
+	Lastmod     time.Time
+	Draft       bool
+	Weight      int
+	Type        string // content type: front matter or root section name
+	Layout      string // explicit template name override
+
+	// Taxonomy fields
+	Tags       []string
+	Categories []string
+	Keywords   []string
+	Taxonomies map[string][]string // plural name -> terms
+
+	// Visibility
 	NoIndex       bool
 	ExcludeSearch bool
-	Params        map[string]any
 
-	Kind      string // "page"|"section"|"home"|"term"|"taxonomy"|"special"
-	Lang      string
-	Section   string
-	Depth     int
+	// Arbitrary front matter params
+	Params map[string]any
+
+	// Page classification
+	Kind    string // "page"|"section"|"home"|"term"|"taxonomy"
+	Lang    string
+	Section string // root section name (first dir under content/)
+	Depth   int
+
+	// Tree structure
 	Parent    *Page
 	Children  []*Page
 	Ancestors []*Page
 
+	// Siblings (populated by build after tree is built)
+	NextPage *Page
+	PrevPage *Page
+
+	// Rendered content
 	ContentHTML  string
-	ContentPlain string // plain text version for search
-	Summary      string
+	ContentPlain string
 	ReadingTime  int
 	WordCount    int
+}
+
+// IsHome reports whether this is the site home page.
+func (p *Page) IsHome() bool { return p.Kind == "home" }
+
+// IsPage reports whether this is a regular content page.
+func (p *Page) IsPage() bool { return p.Kind == "page" }
+
+// IsSection reports whether this is a section index page.
+func (p *Page) IsSection() bool { return p.Kind == "section" }
+
+// IsNode reports whether this is a list page (home, section, taxonomy, term).
+func (p *Page) IsNode() bool {
+	return p.Kind == "home" || p.Kind == "section" || p.Kind == "taxonomy" || p.Kind == "term"
+}
+
+// Plain returns plain-text content for templates.
+func (p *Page) Plain() string { return p.ContentPlain }
+
+// FuzzyWordCount returns WordCount rounded to the nearest 100.
+func (p *Page) FuzzyWordCount() int {
+	if p.WordCount < 100 {
+		return p.WordCount
+	}
+	return int(math.Round(float64(p.WordCount)/100.0)) * 100
+}
+
+// Pages returns direct children (for list templates).
+func (p *Page) Pages() []*Page { return p.Children }
+
+// RegularPages returns only Kind=="page" children.
+func (p *Page) RegularPages() []*Page {
+	var out []*Page
+	for _, c := range p.Children {
+		if c.Kind == "page" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// Sections returns only Kind=="section" children.
+func (p *Page) Sections() []*Page {
+	var out []*Page
+	for _, c := range p.Children {
+		if c.Kind == "section" {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // HashFile computes SHA-256 of a file and returns hex string.
@@ -77,11 +154,7 @@ func HashFile(path string) (string, error) {
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
-// tagCodeFences rewrites bare ``` code fences to add a language tag.
-// It detects the language from: (1) the most-recent heading ("## Python Solution"),
-// (2) code content patterns (def/class → python, func/:= → go, etc.).
-// This runs on the raw markdown bytes before goldmark parses, so the language
-// info is available to the chroma highlighter.
+// tagCodeFences rewrites bare ``` fences to add a language tag.
 func tagCodeFences(data []byte) []byte {
 	lines := bytes.Split(data, []byte("\n"))
 	out := make([][]byte, 0, len(lines))
@@ -92,14 +165,11 @@ func tagCodeFences(data []byte) []byte {
 		line := lines[i]
 		trimmed := bytes.TrimSpace(line)
 
-		// Track the most recent heading for language context.
 		if len(trimmed) > 0 && trimmed[0] == '#' {
 			lastHeading = strings.ToLower(string(trimmed))
 		}
 
-		// Bare opening fence — no language tag, not inside another fence.
 		if bytes.Equal(trimmed, []byte("```")) {
-			// Read ahead to collect the fence body.
 			body := [][]byte{}
 			j := i + 1
 			for j < len(lines) && !bytes.Equal(bytes.TrimSpace(lines[j]), []byte("```")) {
@@ -110,13 +180,12 @@ func tagCodeFences(data []byte) []byte {
 			out = append(out, []byte("```"+lang))
 			out = append(out, body...)
 			if j < len(lines) {
-				out = append(out, lines[j]) // closing ```
+				out = append(out, lines[j])
 			}
 			i = j + 1
 			continue
 		}
 
-		// Tagged fence (```python, ```go …) — skip its body unchanged.
 		if bytes.HasPrefix(trimmed, []byte("```")) && len(trimmed) > 3 {
 			out = append(out, line)
 			i++
@@ -145,7 +214,6 @@ var (
 	reCPP    = regexp.MustCompile(`(?m)#include\s*<|std::|cout\s*<<`)
 )
 
-// fenceLang picks a language tag from heading text or code content patterns.
 func fenceLang(heading string, bodyLines [][]byte) string {
 	h := heading
 	switch {
@@ -183,9 +251,7 @@ func fenceLang(heading string, bodyLines [][]byte) string {
 	return ""
 }
 
-// mdLinkRewriter strips ".md" from local link destinations so that markdown
-// files can reference each other with relative .md paths while the rendered
-// HTML links point to the clean URL (e.g. "00xx/1.md" → "00xx/1/").
+// mdLinkRewriter strips ".md" from local link destinations.
 type mdLinkRewriter struct{}
 
 func (mdLinkRewriter) Transform(doc *ast.Document, _ text.Reader, _ parser.Context) {
@@ -202,12 +268,10 @@ func (mdLinkRewriter) Transform(doc *ast.Document, _ text.Reader, _ parser.Conte
 		default:
 			return ast.WalkContinue, nil
 		}
-		// Only rewrite local relative paths that end with ".md"
 		d := string(dest)
 		if strings.Contains(d, "://") || !strings.HasSuffix(d, ".md") {
 			return ast.WalkContinue, nil
 		}
-		// Strip .md; add trailing slash for clean URL
 		clean := strings.TrimSuffix(d, ".md") + "/"
 		switch v := n.(type) {
 		case *ast.Link:
@@ -219,7 +283,6 @@ func (mdLinkRewriter) Transform(doc *ast.Document, _ text.Reader, _ parser.Conte
 	})
 }
 
-// mdLinkRewriterExt is a goldmark extension that registers mdLinkRewriter.
 type mdLinkRewriterExt struct{}
 
 func (mdLinkRewriterExt) Extend(m goldmark.Markdown) {
@@ -230,14 +293,9 @@ func (mdLinkRewriterExt) Extend(m goldmark.Markdown) {
 	)
 }
 
-// SyntaxHighlight controls whether Chroma server-side syntax highlighting is
-// enabled. Default false: code blocks render as <pre><code class="language-xxx">
-// for client-side highlighters (Prism.js, highlight.js). Set true to enable
-// Chroma; note that Chroma adds ~50% to fresh build time on large corpora.
+// SyntaxHighlight controls whether Chroma server-side syntax highlighting is enabled.
 var SyntaxHighlight bool
 
-// mdRendererPool pools goldmark.Markdown instances so concurrent ParseAndRender
-// calls each get their own instance (goldmark is not safe for concurrent use).
 var mdRendererPool = sync.Pool{
 	New: func() any { return newMDRenderer() },
 }
@@ -260,31 +318,24 @@ func newMDRenderer() goldmark.Markdown {
 	}
 	return goldmark.New(
 		goldmark.WithExtensions(exts...),
-		goldmark.WithRendererOptions(
-			html.WithUnsafe(),
-		),
-		goldmark.WithParserOptions(
-			parser.WithAutoHeadingID(),
-		),
+		goldmark.WithRendererOptions(html.WithUnsafe()),
+		goldmark.WithParserOptions(parser.WithAutoHeadingID()),
 	)
 }
 
-// ParseAndRender reads a markdown file, parses frontmatter, and renders to HTML.
+// ParseAndRender reads a markdown file, parses front matter, and renders HTML.
 func ParseAndRender(filePath string) (*Page, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", filePath, err)
 	}
 
-	// Compute hash from original source (before preprocessing).
 	h := sha256.New()
 	h.Write(data)
 	fileHash := fmt.Sprintf("%x", h.Sum(nil))
 
-	// Pre-process: tag bare code fences with detected language before goldmark parses.
 	rendered := tagCodeFences(data)
 
-	// Render markdown → HTML using a pooled goldmark instance (not concurrency-safe).
 	md := mdRendererPool.Get().(goldmark.Markdown)
 	var buf bytes.Buffer
 	ctx := parser.NewContext()
@@ -295,7 +346,6 @@ func ParseAndRender(filePath string) (*Page, error) {
 	}
 	contentHTML := buf.String()
 
-	// Extract frontmatter
 	fm := meta.Get(ctx)
 
 	page := &Page{
@@ -303,9 +353,10 @@ func ParseAndRender(filePath string) (*Page, error) {
 		FileHash:    fileHash,
 		ContentHTML: contentHTML,
 		Params:      make(map[string]any),
+		Taxonomies:  make(map[string][]string),
 	}
 
-	// Parse known frontmatter fields
+	// Core metadata
 	if v, ok := fm["title"]; ok {
 		page.Title = toString(v)
 	}
@@ -320,9 +371,45 @@ func ParseAndRender(filePath string) (*Page, error) {
 	if v, ok := fm["description"]; ok {
 		page.Description = smartTruncate(toString(v), 280)
 	}
+	if v, ok := fm["summary"]; ok {
+		page.Summary = toString(v)
+	}
+
+	// Dates with Hugo-compatible aliases
 	if v, ok := fm["date"]; ok {
 		page.Date = parseDate(toString(v))
 	}
+	for _, key := range []string{"publishDate", "publishdate", "pubdate", "published"} {
+		if v, ok := fm[key]; ok {
+			if d := parseDate(toString(v)); !d.IsZero() {
+				page.PublishDate = d
+				break
+			}
+		}
+	}
+	if page.PublishDate.IsZero() {
+		page.PublishDate = page.Date
+	}
+	for _, key := range []string{"expiryDate", "expirydate", "unpublishdate"} {
+		if v, ok := fm[key]; ok {
+			if d := parseDate(toString(v)); !d.IsZero() {
+				page.ExpiryDate = d
+				break
+			}
+		}
+	}
+	for _, key := range []string{"lastmod", "modified"} {
+		if v, ok := fm[key]; ok {
+			if d := parseDate(toString(v)); !d.IsZero() {
+				page.Lastmod = d
+				break
+			}
+		}
+	}
+	if page.Lastmod.IsZero() {
+		page.Lastmod = page.Date
+	}
+
 	if v, ok := fm["draft"]; ok {
 		page.Draft = toBool(v)
 	}
@@ -332,26 +419,62 @@ func ParseAndRender(filePath string) (*Page, error) {
 	if v, ok := fm["type"]; ok {
 		page.Type = toString(v)
 	}
-	if v, ok := fm["noIndex"]; ok {
-		page.NoIndex = toBool(v)
-	} else if v, ok := fm["no_index"]; ok {
-		page.NoIndex = toBool(v)
-	}
-	if v, ok := fm["excludeSearch"]; ok {
-		page.ExcludeSearch = toBool(v)
-	} else if v, ok := fm["exclude_search"]; ok {
-		page.ExcludeSearch = toBool(v)
-	}
-	if v, ok := fm["tags"]; ok {
-		page.Tags = toStringSlice(v)
+	if v, ok := fm["layout"]; ok {
+		page.Layout = toString(v)
 	}
 
-	// Everything else goes to Params
+	// URL overrides
+	if v, ok := fm["slug"]; ok {
+		page.Slug = toString(v)
+	}
+	if v, ok := fm["url"]; ok {
+		page.URL = toString(v)
+	}
+	if v, ok := fm["aliases"]; ok {
+		page.Aliases = toStringSlice(v)
+	}
+
+	// Taxonomy
+	if v, ok := fm["tags"]; ok {
+		page.Tags = toStringSlice(v)
+		page.Taxonomies["tags"] = page.Tags
+	}
+	if v, ok := fm["categories"]; ok {
+		page.Categories = toStringSlice(v)
+		page.Taxonomies["categories"] = page.Categories
+	}
+	if v, ok := fm["keywords"]; ok {
+		page.Keywords = toStringSlice(v)
+	}
+
+	// Visibility
+	for _, key := range []string{"noIndex", "no_index", "noindex"} {
+		if v, ok := fm[key]; ok {
+			page.NoIndex = toBool(v)
+			break
+		}
+	}
+	for _, key := range []string{"excludeSearch", "exclude_search"} {
+		if v, ok := fm[key]; ok {
+			page.ExcludeSearch = toBool(v)
+			break
+		}
+	}
+
+	// Everything else -> Params
 	known := map[string]bool{
 		"title": true, "linkTitle": true, "link_title": true,
-		"description": true, "date": true, "draft": true,
-		"weight": true, "type": true, "noIndex": true, "no_index": true,
-		"excludeSearch": true, "exclude_search": true, "tags": true,
+		"description": true, "summary": true,
+		"date": true, "publishDate": true, "publishdate": true,
+		"pubdate": true, "published": true,
+		"expiryDate": true, "expirydate": true, "unpublishdate": true,
+		"lastmod": true, "modified": true,
+		"draft": true, "weight": true, "type": true, "layout": true,
+		"slug": true, "url": true, "aliases": true,
+		"tags": true, "categories": true, "keywords": true,
+		"noIndex": true, "no_index": true, "noindex": true,
+		"excludeSearch": true, "exclude_search": true,
+		"cascade": true,
 	}
 	for k, v := range fm {
 		if !known[k] {
@@ -359,23 +482,22 @@ func ParseAndRender(filePath string) (*Page, error) {
 		}
 	}
 
-	// Compute word count and reading time
+	// Word count and reading time
 	plainText := stripHTML(contentHTML)
-	plainText = strings.Join(strings.Fields(plainText), " ") // normalize whitespace
+	plainText = strings.Join(strings.Fields(plainText), " ")
 	words := countWords(plainText)
 	page.WordCount = words
 	page.ReadingTime = int(math.Ceil(float64(words) / 200.0))
-
-	// Store plain text for search
 	page.ContentPlain = plainText
 
-	// Generate summary: first 70 words
-	page.Summary = summarize(plainText, 70)
+	if page.Summary == "" {
+		page.Summary = summarize(plainText, 70)
+	}
 
 	return page, nil
 }
 
-// isAlpha returns true if s consists only of lowercase ASCII letters.
+// isAlpha reports whether s contains only lowercase ASCII letters.
 func isAlpha(s string) bool {
 	for _, r := range s {
 		if r < 'a' || r > 'z' {
@@ -385,10 +507,7 @@ func isAlpha(s string) bool {
 	return true
 }
 
-// PermalinkFromPath derives the permalink from file path + lang + content root.
-// contentDir: root content directory
-// filePath:   absolute path to the .md file
-// defaultLang: language that gets no URL prefix (usually "en")
+// PermalinkFromPath derives the base permalink from a file path.
 func PermalinkFromPath(contentDir, filePath, defaultLang string) (string, string) {
 	rel, _ := filepath.Rel(contentDir, filePath)
 	rel = filepath.ToSlash(rel)
@@ -396,27 +515,27 @@ func PermalinkFromPath(contentDir, filePath, defaultLang string) (string, string
 	parts := strings.SplitN(rel, "/", 2)
 
 	var lang, rest string
-	// Detect if first segment is a language code (2-letter alpha)
 	if len(parts[0]) == 2 && isAlpha(parts[0]) {
 		lang = parts[0]
 		if len(parts) > 1 {
 			rest = parts[1]
 		}
 	} else {
-		// contentDir is already language-specific, use defaultLang
 		lang = defaultLang
 		rest = rel
 	}
 
-	// Strip extension
 	ext := filepath.Ext(rest)
 	rest = strings.TrimSuffix(rest, ext)
 
-	// _index → parent dir permalink
 	if strings.HasSuffix(rest, "/_index") {
 		rest = strings.TrimSuffix(rest, "/_index")
 	} else if rest == "_index" {
 		rest = ""
+	}
+	// Leaf bundle: index.md in a subdir -> parent dir permalink
+	if strings.HasSuffix(rest, "/index") {
+		rest = strings.TrimSuffix(rest, "/index")
 	}
 
 	var permalink string
@@ -434,14 +553,50 @@ func PermalinkFromPath(contentDir, filePath, defaultLang string) (string, string
 		}
 	}
 
-	// Clean double slashes
 	for strings.Contains(permalink, "//") {
 		permalink = strings.ReplaceAll(permalink, "//", "/")
 	}
 	return permalink, lang
 }
 
-// OutputPathFromPermalink converts a permalink to an output file path under outputDir.
+// ApplySlugURL applies slug and url front matter overrides to a base permalink.
+// page.Kind must be set before calling.
+func ApplySlugURL(base string, page *Page) string {
+	if page.URL != "" {
+		u := page.URL
+		if !strings.HasPrefix(u, "/") {
+			u = "/" + u
+		}
+		if !strings.HasSuffix(u, "/") {
+			u += "/"
+		}
+		return u
+	}
+	if page.Slug != "" && page.Kind == "page" {
+		trimmed := strings.TrimRight(base, "/")
+		lastSlash := strings.LastIndex(trimmed, "/")
+		if lastSlash >= 0 {
+			return trimmed[:lastSlash+1] + slugify(page.Slug) + "/"
+		}
+		return "/" + slugify(page.Slug) + "/"
+	}
+	return base
+}
+
+// slugify converts a string to a URL-safe slug.
+func slugify(s string) string {
+	s = strings.ToLower(s)
+	s = strings.ReplaceAll(s, " ", "-")
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// OutputPathFromPermalink converts a permalink to an output file path.
 func OutputPathFromPermalink(outputDir, permalink string) string {
 	clean := strings.Trim(permalink, "/")
 	if clean == "" {
@@ -450,8 +605,7 @@ func OutputPathFromPermalink(outputDir, permalink string) string {
 	return filepath.Join(outputDir, filepath.FromSlash(clean), "index.html")
 }
 
-// smartTruncate cuts text at a sentence boundary (. ! ?) within maxChars.
-// Falls back to word boundary + ellipsis when no sentence end is found.
+// smartTruncate cuts text at a sentence boundary within maxChars.
 func smartTruncate(text string, maxChars int) string {
 	if len(text) <= maxChars {
 		return text
@@ -463,7 +617,7 @@ func smartTruncate(text string, maxChars int) string {
 			last = idx
 		}
 	}
-	if last >= maxChars*2/5 { // at least 40% in
+	if last >= maxChars*2/5 {
 		return strings.TrimSpace(text[:last+1])
 	}
 	if cut := strings.LastIndex(window, " "); cut > 0 {
@@ -471,8 +625,6 @@ func smartTruncate(text string, maxChars int) string {
 	}
 	return window + "…"
 }
-
-// --- helper conversion functions ---
 
 func toString(v any) string {
 	if v == nil {
@@ -573,11 +725,9 @@ func summarize(text string, maxWords int) string {
 	if len(words) <= maxWords {
 		return strings.Join(words, " ")
 	}
-	return strings.Join(words[:maxWords], " ") + "…"
+	return strings.Join(words[:maxWords], " ") + "..."
 }
 
-// langStrip removes the language prefix from path parts if present.
-// Returns the parts without the lang prefix.
 func langStrip(parts []string) []string {
 	if len(parts) > 0 && len(parts[0]) == 2 && isAlpha(parts[0]) {
 		return parts[1:]
@@ -585,13 +735,11 @@ func langStrip(parts []string) []string {
 	return parts
 }
 
-// KindFromPath determines the page kind from its path.
+// KindFromPath determines the page kind from its file path.
 func KindFromPath(contentDir, filePath string) string {
 	rel, _ := filepath.Rel(contentDir, filePath)
 	rel = filepath.ToSlash(rel)
 	parts := strings.Split(rel, "/")
-
-	// Remove lang prefix if present
 	parts = langStrip(parts)
 
 	base := ""
@@ -599,11 +747,17 @@ func KindFromPath(contentDir, filePath string) string {
 		base = parts[len(parts)-1]
 	}
 
-	if base == "_index.md" || base == "index.md" {
+	if base == "_index.md" {
 		if len(parts) == 1 {
 			return "home"
 		}
 		return "section"
+	}
+	if base == "index.md" {
+		if len(parts) == 1 {
+			return "home"
+		}
+		return "page" // leaf bundle
 	}
 	return "page"
 }
@@ -613,29 +767,22 @@ func SectionFromPath(contentDir, filePath string) string {
 	rel, _ := filepath.Rel(contentDir, filePath)
 	rel = filepath.ToSlash(rel)
 	parts := strings.Split(rel, "/")
-	// Skip lang prefix if present
 	rest := langStrip(parts)
-	if len(rest) == 0 {
+	if len(rest) == 0 || rest[0] == "_index.md" || rest[0] == "index.md" {
 		return ""
 	}
-	if rest[0] == "_index.md" || rest[0] == "index.md" {
-		return ""
-	}
-	// If there's only one segment and it's a file, section is empty (top-level page)
 	if len(rest) == 1 {
 		return ""
 	}
 	return rest[0]
 }
 
-// DepthFromPath calculates depth: home=0, top-level pages/sections=1, nested=2, etc.
+// DepthFromPath calculates depth: home=0, top-level=1, nested=2, etc.
 func DepthFromPath(contentDir, filePath string) int {
 	rel, _ := filepath.Rel(contentDir, filePath)
 	rel = filepath.ToSlash(rel)
 	parts := strings.Split(rel, "/")
-	// Remove lang prefix if present
 	parts = langStrip(parts)
-	// Remove filename
 	if len(parts) > 0 {
 		parts = parts[:len(parts)-1]
 	}
@@ -643,28 +790,20 @@ func DepthFromPath(contentDir, filePath string) int {
 }
 
 // WriteChromaCSS writes a combined light+dark syntax-highlight stylesheet.
-// Light rules use the "github" chroma style; dark rules are prefixed with ".dark".
-// Returns the SHA-256 hex hash of the written file (for fingerprinting).
 func WriteChromaCSS(path string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return "", err
 	}
 
 	formatter := chromahtml.New(chromahtml.WithClasses(true))
-
 	var buf bytes.Buffer
 
-	// Light theme (github)
-	buf.WriteString("/* chroma syntax highlighting — light (github) */\n")
+	buf.WriteString("/* chroma syntax highlighting -- light (github) */\n")
 	if err := formatter.WriteCSS(&buf, styles.Get("github")); err != nil {
 		return "", fmt.Errorf("light css: %w", err)
 	}
 
-	// Dark theme (dracula): prefix every CSS rule with ".dark ".
-	// Chroma emits lines like: "/* Keyword */ .chroma .k { color: #... }"
-	// We must strip the "/* ... */" comment before checking for the selector,
-	// otherwise HasPrefix(".") never matches and dark rules leak into light mode.
-	buf.WriteString("\n/* chroma syntax highlighting — dark (dracula) */\n")
+	buf.WriteString("\n/* chroma syntax highlighting -- dark (dracula) */\n")
 	var darkBuf bytes.Buffer
 	if err := formatter.WriteCSS(&darkBuf, styles.Get("dracula")); err != nil {
 		return "", fmt.Errorf("dark css: %w", err)
@@ -674,7 +813,6 @@ func WriteChromaCSS(path string) (string, error) {
 		if line == "" {
 			continue
 		}
-		// Strip block comment prefix ("/* ... */ ") to reach the CSS selector.
 		if idx := strings.Index(line, "*/"); idx >= 0 {
 			line = strings.TrimSpace(line[idx+2:])
 		}
