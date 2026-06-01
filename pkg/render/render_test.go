@@ -140,7 +140,7 @@ func TestFuncDefaultFn(t *testing.T) {
 func TestFuncDateFormat(t *testing.T) {
 	r := makeRenderer(t)
 	fm := r.buildFuncMap()
-	dateFormatFn := fm["dateFormat"].(func(string, time.Time) string)
+	dateFormatFn := fm["dateFormat"].(func(any, any) string)
 
 	t1 := time.Date(2024, 6, 15, 0, 0, 0, 0, time.UTC)
 	got := dateFormatFn("2006-01-02", t1)

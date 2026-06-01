@@ -36,6 +36,7 @@ type Page struct {
 
 	// URL fields
 	RelPermalink string
+	Permalink    string // full URL with base URL (set by build)
 	OutputPath   string
 	Slug         string   // front matter slug: overrides last URL segment
 	URL          string   // front matter url: overrides entire permalink

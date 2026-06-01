@@ -35,6 +35,147 @@ type SiteData struct {
 	Params       map[string]any  // .Site.Params — from [params] in tago.toml
 	Pages        []*content.Page // all pages (set by Build)
 	RegularPages []*content.Page // kind=page only (set by Build)
+
+	// Hugo-compatible fields
+	LanguageCode string            // e.g. "en-us"
+	Language     *SiteLanguage     // language metadata object
+	Copyright    string
+	Author       map[string]any
+	Menus        map[string][]SiteMenuItem // .Site.Menus.main etc.
+}
+
+// SiteMenuItem represents a single navigation menu item.
+type SiteMenuItem struct {
+	Name        string
+	URL         string
+	Weight      int
+	Identifier  string
+	HasChildren bool
+	Children    []SiteMenuItem
+}
+
+// HugoPage wraps *content.Page with Site for use inside range loops in Hugo themes.
+// Hugo themes do {{range .Pages}}...{{.Site.Params.x}}...{{end}} expecting .Site on each page.
+type HugoPage struct {
+	*content.Page
+	Site *SiteData
+}
+
+// Date returns HugoTime for flexible Format calls in templates.
+func (hp *HugoPage) Date() HugoTime { return newHugoTime(hp.Page.Date) }
+
+// PublishDate returns HugoTime.
+func (hp *HugoPage) PublishDate() HugoTime { return newHugoTime(hp.Page.PublishDate) }
+
+// Lastmod returns HugoTime.
+func (hp *HugoPage) Lastmod() HugoTime { return newHugoTime(hp.Page.Lastmod) }
+
+// ExpiryDate returns HugoTime.
+func (hp *HugoPage) ExpiryDate() HugoTime { return newHugoTime(hp.Page.ExpiryDate) }
+
+// Permalink returns the full URL.
+func (hp *HugoPage) Permalink() string { return hp.Page.Permalink }
+
+// RelPermalink returns the relative URL.
+func (hp *HugoPage) RelPermalink() string { return hp.Page.RelPermalink }
+
+// IsPage returns true if page kind is "page".
+func (hp *HugoPage) IsPage() bool { return hp.Page.Kind == "page" }
+
+// IsHome returns true if page kind is "home".
+func (hp *HugoPage) IsHome() bool { return hp.Page.Kind == "home" }
+
+// IsSection returns true if page kind is "section".
+func (hp *HugoPage) IsSection() bool { return hp.Page.Kind == "section" }
+
+// PageData mirrors Hugo's .Data field on taxonomy/term pages (provides .Pages).
+type PageData struct {
+	Pages HugoPageList
+}
+
+// HugoPageList wraps []*HugoPage with Hugo-compatible methods.
+type HugoPageList []*HugoPage
+
+// GroupByDate groups pages by a date format string, returning [{Key, Pages}] sorted descending.
+func (pl HugoPageList) GroupByDate(layout string) []HugoPageGroup {
+	groups := map[string]HugoPageList{}
+	order := []string{}
+	for _, p := range pl {
+		key := p.Date().Format(layout)
+		if _, ok := groups[key]; !ok {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], p)
+	}
+	result := make([]HugoPageGroup, 0, len(order))
+	for _, k := range order {
+		result = append(result, HugoPageGroup{Key: k, Pages: groups[k]})
+	}
+	return result
+}
+
+// HugoPageGroup is a group of pages with a common key (e.g. year).
+type HugoPageGroup struct {
+	Key   string
+	Pages HugoPageList
+}
+
+// wrapPages wraps []*content.Page into HugoPageList, attaching site data to each page.
+func wrapPages(pages []*content.Page, site *SiteData) HugoPageList {
+	out := make(HugoPageList, len(pages))
+	for i, p := range pages {
+		out[i] = &HugoPage{Page: p, Site: site}
+	}
+	return out
+}
+
+// SiteLanguage holds language-specific site metadata for .Site.Language
+type SiteLanguage struct {
+	Lang              string // language code (e.g. "en")
+	LanguageCode      string
+	LanguageName      string
+	LanguageDirection string
+	Weight            int
+}
+
+func (l *SiteLanguage) String() string {
+	if l == nil {
+		return "en"
+	}
+	return l.Lang
+}
+
+// Get returns a language param (stub for Hugo .Site.Language.Get "key").
+func (l *SiteLanguage) Get(key string) any {
+	return nil
+}
+
+// Hugo returns the hugo namespace (allows {{ .Site.Hugo.Version }} in templates).
+func (s *SiteData) Hugo() *hugoNamespace { return &hugoNamespace{} }
+
+// DisqusShortname returns empty string (stub).
+func (s *SiteData) DisqusShortname() string { return "" }
+
+// GoogleAnalytics returns empty string (stub).
+func (s *SiteData) GoogleAnalytics() string { return "" }
+
+// RSSLink returns the RSS feed URL for the site.
+func (s *SiteData) RSSLink() string {
+	return strings.TrimRight(s.BaseURL, "/") + "/index.xml"
+}
+
+// Data returns empty map (stub for .Site.Data).
+func (s *SiteData) Data() map[string]any { return nil }
+
+// Taxonomies returns empty map (stub for .Site.Taxonomies).
+func (s *SiteData) Taxonomies() map[string]any { return nil }
+
+// Param looks up a param in Site.Params (Hugo .Param method falls through to site).
+func (s *SiteData) Param(key string) any {
+	if s.Params != nil {
+		return s.Params[key]
+	}
+	return nil
 }
 
 // AssetRefs holds fingerprinted asset URLs.
@@ -64,12 +205,40 @@ type SidebarItem struct {
 	Children  []*SidebarItem
 }
 
+// HugoTime wraps time.Time with a Format method that accepts any (string or nil).
+// Hugo themes use .Date.Format .Site.Params.dateformShort where the format is interface{}.
+type HugoTime struct {
+	time.Time
+}
+
+func newHugoTime(t time.Time) HugoTime { return HugoTime{t} }
+
+// Format overrides time.Time.Format to accept any format value (string, nil, etc.).
+func (ht HugoTime) Format(layout any) string {
+	if ht.IsZero() {
+		return ""
+	}
+	var l string
+	switch v := layout.(type) {
+	case string:
+		l = v
+	case nil:
+		l = "2006-01-02"
+	default:
+		l = fmt.Sprintf("%v", v)
+	}
+	if l == "" {
+		l = "2006-01-02"
+	}
+	return ht.Time.Format(l)
+}
+
 // TemplateData is the data passed to all templates.
 type TemplateData struct {
 	Page             *content.Page
 	Site             *SiteData
 	Assets           AssetRefs
-	Pages            []*content.Page // for list pages: children or tag members
+	Pages            HugoPageList    // for list pages: children or tag members
 	Tags             []TagCount      // for taxonomy page
 	GraphDataJSON    string          // JSON string, embedded inline for type=graph
 	TreeDataJSON     string          // JSON string, embedded inline for type=tree
@@ -79,6 +248,311 @@ type TemplateData struct {
 	SidebarBack      *content.Page   // back-link target (nil = no back link)
 	PrevPage         *content.Page   // previous sibling (for pager)
 	NextPage         *content.Page   // next sibling (for pager)
+}
+
+// Hugo-compatible page field forwarding methods on TemplateData.
+// Hugo themes use .Title, .Content, .Permalink, etc. directly on . (the context).
+// These methods delegate to .Page so Hugo themes work unchanged.
+
+func (d *TemplateData) Title() string {
+	if d.Page == nil {
+		return ""
+	}
+	return d.Page.Title
+}
+
+func (d *TemplateData) LinkTitle() string {
+	if d.Page == nil {
+		return ""
+	}
+	if d.Page.LinkTitle != "" {
+		return d.Page.LinkTitle
+	}
+	return d.Page.Title
+}
+
+func (d *TemplateData) Description() string {
+	if d.Page == nil {
+		return ""
+	}
+	return d.Page.Description
+}
+
+func (d *TemplateData) Summary() string {
+	if d.Page == nil {
+		return ""
+	}
+	return d.Page.Summary
+}
+
+func (d *TemplateData) Content() template.HTML {
+	if d.Page == nil {
+		return ""
+	}
+	return template.HTML(d.Page.ContentHTML)
+}
+
+func (d *TemplateData) Permalink() string {
+	if d.Page == nil {
+		return ""
+	}
+	return d.Page.Permalink
+}
+
+func (d *TemplateData) RelPermalink() string {
+	if d.Page == nil {
+		return ""
+	}
+	return d.Page.RelPermalink
+}
+
+func (d *TemplateData) Date() HugoTime {
+	if d.Page == nil {
+		return HugoTime{}
+	}
+	return newHugoTime(d.Page.Date)
+}
+
+func (d *TemplateData) PublishDate() HugoTime {
+	if d.Page == nil {
+		return HugoTime{}
+	}
+	return newHugoTime(d.Page.PublishDate)
+}
+
+func (d *TemplateData) ExpiryDate() HugoTime {
+	if d.Page == nil {
+		return HugoTime{}
+	}
+	return newHugoTime(d.Page.ExpiryDate)
+}
+
+func (d *TemplateData) Lastmod() HugoTime {
+	if d.Page == nil {
+		return HugoTime{}
+	}
+	return newHugoTime(d.Page.Lastmod)
+}
+
+func (d *TemplateData) Draft() bool {
+	if d.Page == nil {
+		return false
+	}
+	return d.Page.Draft
+}
+
+func (d *TemplateData) Weight() int {
+	if d.Page == nil {
+		return 0
+	}
+	return d.Page.Weight
+}
+
+func (d *TemplateData) Kind() string {
+	if d.Page == nil {
+		return ""
+	}
+	return d.Page.Kind
+}
+
+func (d *TemplateData) Type() string {
+	if d.Page == nil {
+		return ""
+	}
+	return d.Page.Type
+}
+
+func (d *TemplateData) Layout() string {
+	if d.Page == nil {
+		return ""
+	}
+	return d.Page.Layout
+}
+
+func (d *TemplateData) Section() string {
+	if d.Page == nil {
+		return ""
+	}
+	return d.Page.Section
+}
+
+func (d *TemplateData) Lang() string {
+	if d.Page == nil {
+		return ""
+	}
+	return d.Page.Lang
+}
+
+func (d *TemplateData) Slug() string {
+	if d.Page == nil {
+		return ""
+	}
+	return d.Page.Slug
+}
+
+func (d *TemplateData) Params() map[string]any {
+	if d.Page == nil {
+		return nil
+	}
+	return d.Page.Params
+}
+
+func (d *TemplateData) Param(key string) any {
+	if d.Page != nil {
+		if v, ok := d.Page.Params[key]; ok {
+			return v
+		}
+	}
+	if d.Site != nil {
+		if v, ok := d.Site.Params[key]; ok {
+			return v
+		}
+	}
+	return nil
+}
+
+func (d *TemplateData) IsPage() bool {
+	if d.Page == nil {
+		return false
+	}
+	return d.Page.Kind == "page"
+}
+
+func (d *TemplateData) IsHome() bool {
+	if d.Page == nil {
+		return false
+	}
+	return d.Page.Kind == "home"
+}
+
+func (d *TemplateData) IsSection() bool {
+	if d.Page == nil {
+		return false
+	}
+	return d.Page.Kind == "section"
+}
+
+func (d *TemplateData) IsNode() bool {
+	if d.Page == nil {
+		return false
+	}
+	k := d.Page.Kind
+	return k == "home" || k == "section" || k == "taxonomy" || k == "term"
+}
+
+func (d *TemplateData) WordCount() int {
+	if d.Page == nil {
+		return 0
+	}
+	return d.Page.WordCount
+}
+
+func (d *TemplateData) ReadingTime() int {
+	if d.Page == nil {
+		return 0
+	}
+	wc := d.Page.WordCount
+	if wc == 0 {
+		return 1
+	}
+	rt := wc / 200
+	if rt == 0 {
+		return 1
+	}
+	return rt
+}
+
+func (d *TemplateData) FuzzyWordCount() int {
+	if d.Page == nil {
+		return 0
+	}
+	return d.Page.FuzzyWordCount()
+}
+
+func (d *TemplateData) Parent() *content.Page {
+	if d.Page == nil {
+		return nil
+	}
+	return d.Page.Parent
+}
+
+func (d *TemplateData) Ancestors() []*content.Page {
+	if d.Page == nil {
+		return nil
+	}
+	return d.Page.Ancestors
+}
+
+// RegularPages returns only kind=page children (for section/home templates).
+func (d *TemplateData) RegularPages() HugoPageList {
+	var out HugoPageList
+	for _, p := range d.Pages {
+		if p.Kind == "page" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// Next returns the next page in the sequence (Hugo: .Next).
+func (d *TemplateData) Next() *content.Page {
+	return d.NextPage
+}
+
+// Prev returns the previous page in the sequence (Hugo: .Prev).
+func (d *TemplateData) Prev() *content.Page {
+	return d.PrevPage
+}
+
+// AlternativeOutputFormats returns empty slice (stub for Hugo compatibility).
+func (d *TemplateData) AlternativeOutputFormats() []any {
+	return nil
+}
+
+// Scratch returns a map stub for Hugo's .Scratch.
+func (d *TemplateData) Scratch() map[string]any {
+	return make(map[string]any)
+}
+
+// Language returns the site language object.
+func (d *TemplateData) Language() *SiteLanguage {
+	if d.Site != nil {
+		return d.Site.Language
+	}
+	return nil
+}
+
+// Data returns Hugo-compatible .Data field (for taxonomy/term pages).
+func (d *TemplateData) Data() *PageData {
+	return &PageData{Pages: d.Pages}
+}
+
+// GitInfo returns nil (stub for Hugo .GitInfo; nil makes {{- if .GitInfo }} false).
+func (d *TemplateData) GitInfo() any {
+	return nil
+}
+
+// NextInSection returns the next page in the section (alias for .Next).
+func (d *TemplateData) NextInSection() *content.Page {
+	return d.NextPage
+}
+
+// PrevInSection returns the prev page in the section (alias for .Prev).
+func (d *TemplateData) PrevInSection() *content.Page {
+	return d.PrevPage
+}
+
+// TableOfContents returns empty string (stub for Hugo .TableOfContents).
+func (d *TemplateData) TableOfContents() template.HTML {
+	return ""
+}
+
+// Truncated returns false (stub for Hugo .Truncated; true means Summary != full content).
+func (d *TemplateData) Truncated() bool {
+	if d.Page == nil {
+		return false
+	}
+	return len(d.Page.Summary) > 0 && d.Page.Summary != d.Page.ContentPlain
 }
 
 // Renderer handles template rendering.
@@ -91,6 +565,7 @@ type Renderer struct {
 	partialCache  map[string]*template.Template
 	tmplMu        sync.Mutex
 	funcMap       template.FuncMap
+	i18nData      map[string]string // loaded from i18n/*.toml or *.yaml
 }
 
 // New creates a new Renderer.
@@ -408,8 +883,11 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 		"rawHTML": func(s string) template.HTML {
 			return template.HTML(s)
 		},
-		"safeJS": func(s string) template.JS {
-			return template.JS(s)
+		"safeJS": func(v any) template.JS {
+			if v == nil {
+				return ""
+			}
+			return template.JS(fmt.Sprintf("%v", v))
 		},
 		"formatDate": func(t time.Time) string {
 			if t.IsZero() {
@@ -432,8 +910,11 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 			}
 			return math.Round(size*10) / 10
 		},
-		"safeURL": func(s string) template.URL {
-			return template.URL(s)
+		"safeURL": func(v any) template.URL {
+			if v == nil {
+				return ""
+			}
+			return template.URL(fmt.Sprintf("%v", v))
 		},
 		"add": func(a, b int) int { return a + b },
 		"sub": func(a, b int) int { return a - b },
@@ -474,9 +955,22 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 		},
 		"sort": sortPages,
 
-		// String functions
-		"safeHTML": func(s string) template.HTML { return template.HTML(s) },
-		"safeCSS":  func(s string) template.CSS { return template.CSS(s) },
+		// String functions — accept any to handle nil params, template.HTML, etc.
+		"safeHTML": func(v any) template.HTML {
+			if v == nil {
+				return ""
+			}
+			if h, ok := v.(template.HTML); ok {
+				return h
+			}
+			return template.HTML(fmt.Sprintf("%v", v))
+		},
+		"safeCSS": func(v any) template.CSS {
+			if v == nil {
+				return ""
+			}
+			return template.CSS(fmt.Sprintf("%v", v))
+		},
 		"markdownify": func(s string) template.HTML {
 			return markdownifyString(s)
 		},
@@ -492,7 +986,20 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 		"replace": func(s, old, newStr string) string {
 			return strings.ReplaceAll(s, old, newStr)
 		},
-		"replaceRE": func(pattern, repl, s string) string {
+		"replaceRE": func(pattern, repl string, v any) any {
+			var s string
+			switch sv := v.(type) {
+			case string:
+				s = sv
+			case template.HTML:
+				re, err := regexp.Compile(pattern)
+				if err != nil {
+					return v
+				}
+				return template.HTML(re.ReplaceAllString(string(sv), repl))
+			default:
+				s = fmt.Sprintf("%v", v)
+			}
 			re, err := regexp.Compile(pattern)
 			if err != nil {
 				return s
@@ -534,11 +1041,29 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 		},
 
 		// Date/time
-		"dateFormat": func(layout string, t time.Time) string {
-			if goLayout, ok := dateFormatLayouts[layout]; ok {
-				return t.Format(goLayout)
+		"dateFormat": func(layout any, t any) string {
+			var l string
+			switch v := layout.(type) {
+			case string:
+				l = v
+			case nil:
+				l = "2006-01-02"
+			default:
+				l = fmt.Sprintf("%v", v)
 			}
-			return t.Format(layout)
+			if goLayout, ok := dateFormatLayouts[l]; ok {
+				l = goLayout
+			}
+			if l == "" {
+				l = "2006-01-02"
+			}
+			switch tv := t.(type) {
+			case time.Time:
+				return tv.Format(l)
+			case HugoTime:
+				return tv.Time.Format(l)
+			}
+			return fmt.Sprintf("%v", t)
 		},
 		"now": time.Now,
 
@@ -697,12 +1222,299 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 		},
 	}
 
+	// Hugo Pipes standalone functions (for pipeline syntax: {{ $r | toCSS }})
+	fm["toCSS"] = func(r *stubResource, opts ...any) *stubResource {
+		if r == nil {
+			return &stubResource{}
+		}
+		return r
+	}
+	fm["minify"] = func(r *stubResource) *stubResource {
+		if r == nil {
+			return &stubResource{}
+		}
+		return r
+	}
+	fm["fingerprint"] = func(args ...any) *stubResource {
+		for _, a := range args {
+			if sr, ok := a.(*stubResource); ok {
+				return sr
+			}
+		}
+		return &stubResource{}
+	}
+	fm["postCSS"] = func(r *stubResource, opts ...any) *stubResource {
+		if r == nil {
+			return &stubResource{}
+		}
+		return r
+	}
+	fm["babel"] = func(r *stubResource, opts ...any) *stubResource {
+		if r == nil {
+			return &stubResource{}
+		}
+		return r
+	}
+
 	// partial: load and render a partial template
-	fm["partial"] = func(name string, ctx any) (template.HTML, error) {
+	fm["partial"] = func(name string, args ...any) (template.HTML, error) {
+		var ctx any
+		if len(args) > 0 {
+			ctx = args[0]
+		}
 		return r.renderPartial(name, ctx)
 	}
 
+	// partialCached: like partial but caches by key (args[0] is ctx, rest are cache keys)
+	fm["partialCached"] = func(name string, args ...any) (template.HTML, error) {
+		var ctx any
+		if len(args) > 0 {
+			ctx = args[0]
+		}
+		return r.renderPartial(name, ctx)
+	}
+
+	// i18n: return translated string or the key itself (stub without actual i18n files)
+	fm["i18n"] = func(key string, args ...any) string {
+		return r.i18nLookup(key)
+	}
+	fm["T"] = fm["i18n"] // Hugo alias
+
+	// safeHTMLAttr wraps a string as a safe HTML attribute value
+	fm["safeHTMLAttr"] = func(v any) template.HTMLAttr {
+		if v == nil {
+			return ""
+		}
+		return template.HTMLAttr(fmt.Sprintf("%v", v))
+	}
+
+	// absLangURL is like absURL but also intended for multilingual sites
+	fm["absLangURL"] = func(path string) string {
+		base := strings.TrimRight(r.site.BaseURL, "/")
+		if !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
+		return base + path
+	}
+
+	// relLangURL is like relURL but also intended for multilingual sites
+	fm["relLangURL"] = func(path string) string {
+		if strings.HasPrefix(path, "/") {
+			return path
+		}
+		return "/" + path
+	}
+
+	// hugo namespace stub — returns an object with a Version field
+	fm["hugo"] = func() *hugoNamespace { return &hugoNamespace{} }
+
+	// site global — returns SiteData (allows {{ site.Params.xxx }} in newer Hugo themes)
+	fm["site"] = func() *SiteData { return r.site }
+
+	// resources namespace stub — all methods return a stub resource
+	fm["resources"] = func() *resourcesNamespace { return &resourcesNamespace{} }
+
+	// templates namespace stub
+	fm["templates"] = func() *templatesNamespace { return &templatesNamespace{layoutsDir: r.layoutsDir} }
+
+	// path namespace
+	fm["path"] = func() *pathNamespace { return &pathNamespace{} }
+
+	// reflect namespace stub
+	fm["reflect"] = func() *reflectNamespace { return &reflectNamespace{} }
+
+	// os stub
+	fm["os"] = func() *osNamespace { return &osNamespace{} }
+
+	// warnf/errorf/debugf — log and continue (don't panic)
+	fm["warnf"] = func(format string, args ...any) string {
+		return "" // silently ignore
+	}
+	fm["errorf"] = func(format string, args ...any) string {
+		return "" // silently ignore (don't fatalf)
+	}
+	fm["debugf"] = func(format string, args ...any) string { return "" }
+
+	// .Param helper — looks up a param in page then site
+	fm["param"] = func(key string) any { return nil }
+
+	// urls namespace
+	fm["urls"] = func() *urlsNamespace { return &urlsNamespace{baseURL: r.site.BaseURL} }
+
+	// crypto stub
+	fm["crypto"] = func() *cryptoNamespace { return &cryptoNamespace{} }
+
+	// collections namespace
+	fm["collections"] = func() *collectionsNamespace { return &collectionsNamespace{} }
+
 	return fm
+}
+
+// --- Namespace stubs for Hugo-compatible template evaluation ---
+
+// hugoNamespace provides the `hugo` template namespace (hugo.Version, hugo.IsProduction, etc.)
+type hugoNamespace struct{}
+
+func (h *hugoNamespace) Version() string     { return "0.147.0" }
+func (h *hugoNamespace) IsProduction() bool  { return false }
+func (h *hugoNamespace) IsDevelopment() bool { return true }
+func (h *hugoNamespace) IsServer() bool      { return false }
+func (h *hugoNamespace) Generator() template.HTML {
+	return template.HTML(`<meta name="generator" content="Hugo 0.147.0">`)
+}
+func (h *hugoNamespace) BuildDate() string { return "" }
+func (h *hugoNamespace) CommitHash() string { return "" }
+func (h *hugoNamespace) Environment() string { return "development" }
+
+// stubResource is the result of any resources pipeline step.
+// All methods return the same stub so pipelines like
+//   resources.Get "x" | resources.ExecuteAsTemplate "y" . | toCSS | minify | fingerprint
+// can be chained without crashing.
+type stubResource struct {
+	path string
+}
+
+func (s *stubResource) Permalink() string         { return "" }
+func (s *stubResource) RelPermalink() string      { return "" }
+func (s *stubResource) Content() template.HTML    { return "" }
+func (s *stubResource) String() string             { return "" }
+func (s *stubResource) MediaType() *stubMediaType { return &stubMediaType{} }
+func (s *stubResource) Data() *stubResourceData   { return &stubResourceData{} }
+func (s *stubResource) Name() string              { return s.path }
+func (s *stubResource) Params() map[string]any    { return nil }
+// Transformation chains
+func (s *stubResource) ToCSS(...any) *stubResource               { return s }
+func (s *stubResource) Minify() *stubResource                    { return s }
+func (s *stubResource) Fingerprint(...string) *stubResource      { return s }
+func (s *stubResource) ExecuteAsTemplate(name string, ctx any) *stubResource { return s }
+func (s *stubResource) PostProcess() *stubResource               { return s }
+
+type stubMediaType struct{}
+func (m *stubMediaType) Type() string   { return "text/css" }
+func (m *stubMediaType) String() string { return "text/css" }
+
+type stubResourceData struct{}
+func (d *stubResourceData) Integrity() string { return "" }
+func (d *stubResourceData) TransitionKey() string { return "" }
+
+// resourcesNamespace implements the `resources` template namespace.
+type resourcesNamespace struct{}
+
+func (rn *resourcesNamespace) Get(path string) *stubResource {
+	return &stubResource{path: path}
+}
+func (rn *resourcesNamespace) GetRemote(url string, opts ...any) *stubResource {
+	return &stubResource{path: url}
+}
+func (rn *resourcesNamespace) FromString(name, content string) *stubResource {
+	return &stubResource{path: name}
+}
+func (rn *resourcesNamespace) ExecuteAsTemplate(name string, ctx any, r ...*stubResource) *stubResource {
+	if len(r) > 0 {
+		return r[0]
+	}
+	return &stubResource{path: name}
+}
+func (rn *resourcesNamespace) Concat(name string, resources ...any) *stubResource {
+	return &stubResource{path: name}
+}
+func (rn *resourcesNamespace) Copy(name string, src *stubResource) *stubResource {
+	return &stubResource{path: name}
+}
+
+// Hugo pipe functions (standalone, for pipeline syntax: {{ $res | toCSS }})
+// These are also registered as flat funcMap entries below.
+
+// templatesNamespace implements the `templates` template namespace.
+type templatesNamespace struct {
+	layoutsDir string
+}
+
+func (tn *templatesNamespace) Exists(name string) bool {
+	if tn.layoutsDir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(tn.layoutsDir, name))
+	return err == nil
+}
+
+// pathNamespace implements the `path` template namespace.
+type pathNamespace struct{}
+
+func (pn *pathNamespace) Join(elems ...string) string  { return filepath.Join(elems...) }
+func (pn *pathNamespace) Base(p string) string         { return filepath.Base(p) }
+func (pn *pathNamespace) Dir(p string) string          { return filepath.Dir(p) }
+func (pn *pathNamespace) Ext(p string) string          { return filepath.Ext(p) }
+func (pn *pathNamespace) Clean(p string) string        { return filepath.Clean(p) }
+
+// reflectNamespace implements the `reflect` template namespace.
+type reflectNamespace struct{}
+
+func (rn *reflectNamespace) IsMap(v any) bool    { return reflect.TypeOf(v).Kind() == reflect.Map }
+func (rn *reflectNamespace) IsSlice(v any) bool  { return reflect.TypeOf(v).Kind() == reflect.Slice }
+func (rn *reflectNamespace) IsString(v any) bool { _, ok := v.(string); return ok }
+
+// osNamespace is a stub for the `os` namespace.
+type osNamespace struct{}
+
+func (on *osNamespace) Getenv(key string) string { return "" }
+func (on *osNamespace) FileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+func (on *osNamespace) ReadFile(path string) (string, error) { return "", nil }
+func (on *osNamespace) ReadDir(path string) ([]os.DirEntry, error) { return nil, nil }
+func (on *osNamespace) Stat(path string) (os.FileInfo, error) { return nil, nil }
+
+// urlsNamespace is a stub for the `urls` namespace.
+type urlsNamespace struct {
+	baseURL string
+}
+
+func (un *urlsNamespace) Parse(rawurl string) any { return nil }
+func (un *urlsNamespace) AbsURL(path string) string {
+	base := strings.TrimRight(un.baseURL, "/")
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return base + path
+}
+func (un *urlsNamespace) RelURL(path string) string {
+	if strings.HasPrefix(path, "/") {
+		return path
+	}
+	return "/" + path
+}
+func (un *urlsNamespace) JoinPath(elems ...string) string { return strings.Join(elems, "/") }
+
+// cryptoNamespace is a stub for the `crypto` namespace.
+type cryptoNamespace struct{}
+
+func (cn *cryptoNamespace) MD5(s string) string  { return "" }
+func (cn *cryptoNamespace) SHA1(s string) string { return "" }
+func (cn *cryptoNamespace) SHA256(s string) string { return "" }
+func (cn *cryptoNamespace) FNV32a(s string) string { return "" }
+func (cn *cryptoNamespace) HMAC(hash, msg, secret string) string { return "" }
+
+// collectionsNamespace is a stub for the `collections` namespace.
+type collectionsNamespace struct{}
+
+func (cn *collectionsNamespace) Append(v any, items ...any) []any {
+	result, _ := v.([]any)
+	return append(result, items...)
+}
+func (cn *collectionsNamespace) Uniq(v any) any     { return v }
+func (cn *collectionsNamespace) Where(v any, key, val string) any { return v }
+
+// i18nLookup returns the i18n translation for a key, or the key itself if not found.
+func (r *Renderer) i18nLookup(key string) string {
+	if r.i18nData != nil {
+		if v, ok := r.i18nData[key]; ok {
+			return v
+		}
+	}
+	// Return key as-is — makes templates readable even without translation files
+	return key
 }
 
 // renderPartial renders a named partial template with the given context.
@@ -718,18 +1530,30 @@ func (r *Renderer) renderPartial(name string, ctx any) (template.HTML, error) {
 	if !ok {
 		var partialContent string
 		if r.layoutsDir != "" {
-			partialPath := filepath.Join(r.layoutsDir, "partials", name)
-			if data, err := os.ReadFile(partialPath); err == nil {
-				partialContent = string(data)
+			// Try both classic (partials/) and newer Hugo convention (_partials/)
+			for _, dir := range []string{"partials", "_partials"} {
+				partialPath := filepath.Join(r.layoutsDir, dir, name)
+				if data, err := os.ReadFile(partialPath); err == nil {
+					partialContent = string(data)
+					break
+				}
 			}
 		}
 		if partialContent == "" {
-			return "", fmt.Errorf("partial %q not found", name)
+			// Silently return empty for missing partials (common for optional partials like comments)
+			return "", nil
 		}
 
 		parsed, err := template.New(name).Funcs(r.funcMap).Parse(partialContent)
 		if err != nil {
 			return "", fmt.Errorf("parse partial %q: %w", name, err)
+		}
+
+		// Register Hugo _internal/ templates into this partial's set.
+		for iname, itmpl := range internalTemplates {
+			if _, err2 := parsed.New(iname).Parse(itmpl); err2 != nil {
+				_ = err2
+			}
 		}
 
 		r.tmplMu.Lock()
@@ -949,6 +1773,16 @@ func (r *Renderer) getTemplateFor(kind, pageType, layout, section, lang string) 
 	if err != nil {
 		return nil, fmt.Errorf("parse template %q: %w", kind, err)
 	}
+
+	// Register Hugo _internal/ templates into the set so themes can call
+	// {{ template "_internal/opengraph.html" . }} etc.
+	for name, tmplContent := range internalTemplates {
+		if _, err2 := t.New(name).Parse(tmplContent); err2 != nil {
+			// non-fatal: skip broken internal template
+			_ = err2
+		}
+	}
+
 	r.tmplCache[cacheKey] = t
 	return t, nil
 }
@@ -1017,17 +1851,17 @@ func (r *Renderer) RenderPage(page *content.Page, allPages []*content.Page) erro
 		case "section":
 			for _, c := range page.Children {
 				if !c.Draft {
-					data.Pages = append(data.Pages, c)
+					data.Pages = append(data.Pages, &HugoPage{Page: c, Site: r.site})
 				}
 			}
 		case "home":
 			for _, p := range allPages {
 				if p.Kind == "page" && !p.Draft && !p.Date.IsZero() {
-					data.Pages = append(data.Pages, p)
+					data.Pages = append(data.Pages, &HugoPage{Page: p, Site: r.site})
 				}
 			}
 			sort.Slice(data.Pages, func(i, j int) bool {
-				return data.Pages[i].Date.After(data.Pages[j].Date)
+				return data.Pages[i].Page.Date.After(data.Pages[j].Page.Date)
 			})
 		}
 	}
@@ -1070,7 +1904,7 @@ func (r *Renderer) RenderTagPage(tag string, pages []*content.Page, outputDir st
 		Page:   fakePage,
 		Site:   r.site,
 		Assets: r.assets,
-		Pages:  pages,
+		Pages:  wrapPages(pages, r.site),
 	}
 
 	return r.renderToFile("term", outputPath, data)

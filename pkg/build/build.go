@@ -175,6 +175,7 @@ func Build(cfg *Config) (*Stats, error) {
 			basePermalink, lang := content.PermalinkFromPath(cfg.ContentDir, r.filePath, cfg.DefaultLang)
 			permalink := content.ApplySlugURL(basePermalink, r.page)
 			r.page.RelPermalink = permalink
+			r.page.Permalink = strings.TrimRight(cfg.BaseURL, "/") + permalink
 			r.page.Lang = lang
 			r.page.OutputPath = content.OutputPathFromPermalink(cfg.OutputDir, permalink)
 			if info, serr := os.Stat(r.filePath); serr == nil {
@@ -329,6 +330,10 @@ func Build(cfg *Config) (*Stats, error) {
 		}
 	}
 
+	lang := cfg.DefaultLang
+	if lang == "" {
+		lang = "en"
+	}
 	site := &render.SiteData{
 		Title:        cfg.SiteTitle,
 		BaseURL:      cfg.BaseURL,
@@ -337,6 +342,13 @@ func Build(cfg *Config) (*Stats, error) {
 		Params:       cfg.Params,
 		Pages:        pageSlice,
 		RegularPages: regularPages,
+		LanguageCode: lang,
+		Language: &render.SiteLanguage{
+			Lang:              lang,
+			LanguageCode:      lang,
+			LanguageName:      lang,
+			LanguageDirection: "ltr",
+		},
 	}
 
 	rAssets := render.AssetRefs{
@@ -664,6 +676,7 @@ func recordToPage(rec *cache.PageRecord, cfg *Config) *content.Page {
 		FileSize:      rec.FileSize,
 		FileMtime:     rec.FileMtime,
 		RelPermalink:  rec.Permalink,
+		Permalink:     strings.TrimRight(cfg.BaseURL, "/") + rec.Permalink,
 		OutputPath:    content.OutputPathFromPermalink(cfg.OutputDir, rec.Permalink),
 		Title:         rec.Title,
 		LinkTitle:     rec.LinkTitle,
