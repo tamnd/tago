@@ -41,14 +41,14 @@ func TestFuncWhere(t *testing.T) {
 	}
 	r := makeRenderer(t)
 	fm := r.buildFuncMap()
-	whereFn := fm["where"].(func([]*content.Page, string, any) []*content.Page)
+	whereFn := fm["where"].(func(...any) any)
 
-	result := whereFn(pages, "Kind", "page")
+	result, _ := whereFn(pages, "Kind", "page").([]any)
 	if len(result) != 2 {
 		t.Errorf("where Kind=page: got %d, want 2", len(result))
 	}
 
-	result2 := whereFn(pages, "Section", "docs")
+	result2, _ := whereFn(pages, "Section", "docs").([]any)
 	if len(result2) != 1 {
 		t.Errorf("where Section=docs: got %d, want 1", len(result2))
 	}
@@ -501,5 +501,114 @@ func TestSiteParams(t *testing.T) {
 	site := makeSite()
 	if site.Params["author"] != "Test Author" {
 		t.Errorf("Site.Params[author] = %v, want Test Author", site.Params["author"])
+	}
+}
+
+func TestFuncAppendPipeline(t *testing.T) {
+	// Simulates the Ananke pattern: $slice | append $item
+	// In Go templates, pipeline value is last arg: append($item, $slice)
+	r := makeRenderer(t)
+	fm := r.buildFuncMap()
+	appendFn := fm["append"].(func(any, ...any) []any)
+
+	base := []any{"ma0", "avenir", "bg-near-white"}
+	// pipeline: base | append "is-home" -> append("is-home", base)
+	result := appendFn("is-home", base)
+	if len(result) != 4 {
+		t.Fatalf("append pipeline: got %d items, want 4: %v", len(result), result)
+	}
+	if result[3] != "is-home" {
+		t.Errorf("append pipeline: last item = %v, want is-home", result[3])
+	}
+
+	// direct form: append(base, "is-home") - base is a slice
+	result2 := appendFn(base, "is-home")
+	if len(result2) != 4 {
+		t.Fatalf("append direct: got %d items, want 4: %v", len(result2), result2)
+	}
+	if result2[3] != "is-home" {
+		t.Errorf("append direct: last item = %v, want is-home", result2[3])
+	}
+}
+
+func TestFuncWhere4Args(t *testing.T) {
+	pages := []any{
+		&HugoPage{Page: &content.Page{Kind: "page"}, Site: makeSite()},
+		&HugoPage{Page: &content.Page{Kind: "section"}, Site: makeSite()},
+	}
+	r := makeRenderer(t)
+	fm := r.buildFuncMap()
+	whereFn := fm["where"].(func(...any) any)
+
+	// 4-arg form: where collection key op value
+	result, _ := whereFn(pages, "Kind", "!=", "section").([]any)
+	if len(result) != 1 {
+		t.Errorf("where 4-arg !=: got %d, want 1", len(result))
+	}
+}
+
+func TestFuncFindRE(t *testing.T) {
+	r := makeRenderer(t)
+	fm := r.buildFuncMap()
+	findFn := fm["findRE"].(func(string, any, ...any) []string)
+
+	result := findFn(`\d+`, "foo 123 bar 456")
+	if len(result) != 2 || result[0] != "123" || result[1] != "456" {
+		t.Errorf("findRE: got %v, want [123 456]", result)
+	}
+
+	// with limit
+	result2 := findFn(`\d+`, "foo 123 bar 456", 1)
+	if len(result2) != 1 || result2[0] != "123" {
+		t.Errorf("findRE limit 1: got %v, want [123]", result2)
+	}
+}
+
+func TestTermsDataAlphabetical(t *testing.T) {
+	td := &TermsData{terms: []TagCount{
+		{Name: "zebra", Count: 5},
+		{Name: "apple", Count: 2},
+		{Name: "mango", Count: 8},
+	}}
+
+	entries := td.Alphabetical()
+	if len(entries) != 3 {
+		t.Fatalf("Alphabetical: got %d entries, want 3", len(entries))
+	}
+	if entries[0].Name != "apple" || entries[1].Name != "mango" || entries[2].Name != "zebra" {
+		t.Errorf("Alphabetical order wrong: %v", entries)
+	}
+
+	by := td.ByCount()
+	if by[0].Name != "mango" || by[0].Count != 8 {
+		t.Errorf("ByCount first = %v, want mango/8", by[0])
+	}
+}
+
+func TestGetNestedField(t *testing.T) {
+	page := &content.Page{Kind: "page", Section: "posts"}
+	page.Params = map[string]any{"draft": true, "weight": 10}
+
+	if v := getNestedField(page, "Kind"); v != "page" {
+		t.Errorf("getNestedField Kind = %v, want page", v)
+	}
+	if v := getNestedField(page, "Params"); v == nil {
+		t.Error("getNestedField Params = nil, want map")
+	}
+}
+
+func TestTimeNamespaceFormat(t *testing.T) {
+	tn := &timeNamespace{}
+	ts := time.Date(2024, 3, 15, 0, 0, 0, 0, time.UTC)
+	result := tn.Format("2006-01-02", ts)
+	if result != "2024-03-15" {
+		t.Errorf("time.Format = %s, want 2024-03-15", result)
+	}
+
+	// with HugoTime
+	ht := HugoTime{ts}
+	result2 := tn.Format("January 2, 2006", ht)
+	if result2 != "March 15, 2024" {
+		t.Errorf("time.Format HugoTime = %s, want March 15, 2024", result2)
 	}
 }

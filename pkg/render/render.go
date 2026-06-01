@@ -1136,7 +1136,10 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 		// ---- new Hugo-compatible functions ----
 
 		// Page/collection filters
-		"where": wherePages,
+		"where": func(args ...any) any {
+			cn := &collectionsNamespace{}
+			return cn.Where(args...)
+		},
 		"first": func(n int, pages []*content.Page) []*content.Page {
 			if n >= len(pages) {
 				return pages
@@ -1311,6 +1314,7 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 			return fmt.Sprintf("%v", t)
 		},
 		"now": time.Now,
+		"time": func() *timeNamespace { return &timeNamespace{} },
 
 		// Math
 		"div": func(a, b int) int {
@@ -1769,6 +1773,57 @@ func (tn *templatesNamespace) Exists(name string) bool {
 func (tn *templatesNamespace) Defer(args ...any) string { return "" }
 
 // pathNamespace implements the `path` template namespace.
+// timeNamespace implements Hugo's `time` template namespace.
+type timeNamespace struct{}
+
+// Format formats a time value using the given layout. Supports pipeline: .Date | time.Format "layout".
+func (tn *timeNamespace) Format(layout any, t ...any) string {
+	var l string
+	switch v := layout.(type) {
+	case string:
+		l = v
+	case nil:
+		l = "2006-01-02"
+	default:
+		l = fmt.Sprintf("%v", v)
+	}
+	if goLayout, ok := dateFormatLayouts[l]; ok {
+		l = goLayout
+	}
+	if l == "" {
+		l = "2006-01-02"
+	}
+	var tv time.Time
+	if len(t) > 0 {
+		switch x := t[0].(type) {
+		case time.Time:
+			tv = x
+		case HugoTime:
+			tv = x.Time
+		}
+	}
+	return tv.Format(l)
+}
+
+func (tn *timeNamespace) Now() time.Time  { return time.Now() }
+func (tn *timeNamespace) Unix(sec, ns int64) time.Time {
+	return time.Unix(sec, ns)
+}
+func (tn *timeNamespace) AsTime(v any, args ...any) time.Time {
+	switch x := v.(type) {
+	case time.Time:
+		return x
+	case HugoTime:
+		return x.Time
+	case string:
+		t, err := time.Parse(time.RFC3339, x)
+		if err == nil {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
 type pathNamespace struct{}
 
 func (pn *pathNamespace) Join(elems ...string) string  { return filepath.Join(elems...) }
