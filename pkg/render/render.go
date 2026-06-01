@@ -3310,6 +3310,14 @@ func matchOp(itemVal any, op string, expected any) bool {
 
 // compareValues returns -1, 0, or 1 for numeric/string comparisons.
 func compareValues(a, b any) int {
+	sa, aIsStr := a.(string)
+	sb, bIsStr := b.(string)
+	if aIsStr && bIsStr {
+		return strings.Compare(sa, sb)
+	}
+	if aIsStr || bIsStr {
+		return strings.Compare(fmt.Sprintf("%v", a), fmt.Sprintf("%v", b))
+	}
 	af := toFloat64(a)
 	bf := toFloat64(b)
 	if af < bf {
