@@ -43,12 +43,12 @@ func TestFuncWhere(t *testing.T) {
 	fm := r.buildFuncMap()
 	whereFn := fm["where"].(func(...any) any)
 
-	result, _ := whereFn(pages, "Kind", "page").([]any)
+	result, _ := whereFn(pages, "Kind", "page").([]*content.Page)
 	if len(result) != 2 {
 		t.Errorf("where Kind=page: got %d, want 2", len(result))
 	}
 
-	result2, _ := whereFn(pages, "Section", "docs").([]any)
+	result2, _ := whereFn(pages, "Section", "docs").([]*content.Page)
 	if len(result2) != 1 {
 		t.Errorf("where Section=docs: got %d, want 1", len(result2))
 	}
@@ -58,9 +58,9 @@ func TestFuncFirst(t *testing.T) {
 	pages := []*content.Page{{Title: "A"}, {Title: "B"}, {Title: "C"}}
 	r := makeRenderer(t)
 	fm := r.buildFuncMap()
-	firstFn := fm["first"].(func(int, []*content.Page) []*content.Page)
+	firstFn := fm["first"].(func(int, any) any)
 
-	result := firstFn(2, pages)
+	result := firstFn(2, pages).([]*content.Page)
 	if len(result) != 2 {
 		t.Errorf("first(2): got %d, want 2", len(result))
 	}
@@ -69,7 +69,7 @@ func TestFuncFirst(t *testing.T) {
 	}
 
 	// first with n > len should return all
-	all := firstFn(10, pages)
+	all := firstFn(10, pages).([]*content.Page)
 	if len(all) != 3 {
 		t.Errorf("first(10) of 3: got %d, want 3", len(all))
 	}
@@ -79,9 +79,9 @@ func TestFuncLast(t *testing.T) {
 	pages := []*content.Page{{Title: "A"}, {Title: "B"}, {Title: "C"}}
 	r := makeRenderer(t)
 	fm := r.buildFuncMap()
-	lastFn := fm["last"].(func(int, []*content.Page) []*content.Page)
+	lastFn := fm["last"].(func(int, any) any)
 
-	result := lastFn(2, pages)
+	result := lastFn(2, pages).([]*content.Page)
 	if len(result) != 2 {
 		t.Errorf("last(2): got %d, want 2", len(result))
 	}
@@ -121,7 +121,7 @@ func TestFuncHumanize(t *testing.T) {
 func TestFuncDefaultFn(t *testing.T) {
 	r := makeRenderer(t)
 	fm := r.buildFuncMap()
-	defaultFn := fm["default"].(func(any, any) any)
+	defaultFn := fm["default"].(func(...any) any)
 
 	// Non-empty value should pass through
 	if got := defaultFn("fallback", "actual"); got != "actual" {
@@ -247,14 +247,14 @@ func TestFuncSort(t *testing.T) {
 	}
 	r := makeRenderer(t)
 	fm := r.buildFuncMap()
-	sortFn := fm["sort"].(func([]*content.Page, ...string) []*content.Page)
+	sortFn := fm["sort"].(func(any, ...string) any)
 
-	sorted := sortFn(pages, "Weight")
+	sorted := sortFn(pages, "Weight").([]*content.Page)
 	if sorted[0].Title != "A" {
 		t.Errorf("sort by Weight: first = %q, want A", sorted[0].Title)
 	}
 
-	sortedByTitle := sortFn(pages, "Title")
+	sortedByTitle := sortFn(pages, "Title").([]*content.Page)
 	if sortedByTitle[0].Title != "A" {
 		t.Errorf("sort by Title: first = %q, want A", sortedByTitle[0].Title)
 	}
@@ -285,13 +285,16 @@ func TestFuncDict(t *testing.T) {
 func TestFuncCond(t *testing.T) {
 	r := makeRenderer(t)
 	fm := r.buildFuncMap()
-	condFn := fm["cond"].(func(any, any, any) any)
+	condFn := fm["cond"].(func(...any) any)
 
 	if condFn(true, "yes", "no") != "yes" {
 		t.Error("cond(true, ...) should return first value")
 	}
 	if condFn(false, "yes", "no") != "no" {
 		t.Error("cond(false, ...) should return second value")
+	}
+	if condFn() != nil {
+		t.Error("cond() with 0 args should return nil")
 	}
 }
 
@@ -486,14 +489,14 @@ func TestSiteDataPages(t *testing.T) {
 	p1 := &content.Page{Kind: "page", Title: "A"}
 	p2 := &content.Page{Kind: "page", Title: "B"}
 	p3 := &content.Page{Kind: "section", Title: "S"}
-	site.Pages = []*content.Page{p1, p2, p3}
-	site.RegularPages = []*content.Page{p1, p2}
+	site.AllPages = []*content.Page{p1, p2, p3}
+	site.AllRegularPages = []*content.Page{p1, p2}
 
-	if len(site.Pages) != 3 {
-		t.Errorf("Site.Pages = %d, want 3", len(site.Pages))
+	if len(site.Pages()) != 3 {
+		t.Errorf("Site.Pages = %d, want 3", len(site.Pages()))
 	}
-	if len(site.RegularPages) != 2 {
-		t.Errorf("Site.RegularPages = %d, want 2", len(site.RegularPages))
+	if len(site.RegularPages()) != 2 {
+		t.Errorf("Site.RegularPages = %d, want 2", len(site.RegularPages()))
 	}
 }
 
