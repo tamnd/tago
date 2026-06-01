@@ -279,6 +279,8 @@ with a few content pages and checking for zero render errors.
 | 2025-06 | 46 | 46 | Added 22 more (coder, eureka, LoveIt, etc.) |
 | 2025-06 | 131 | 131 | Expanded with more public themes |
 | 2025-06 | 183 | 183 | Further expansion |
+| 2026-06 | 198 | 198 | Bootstrap, academic-cv, theme-blog, wowchemy |
+| 2026-06 | 250 | 250 | docsy, learn, pickles, casper, soho, and many more |
 
 ## Error Patterns Found in the Wild
 
