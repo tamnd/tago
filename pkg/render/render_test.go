@@ -939,3 +939,295 @@ func TestHugoCompatInlineDefine(t *testing.T) {
 		t.Errorf("inline define result = %q, want hello", out)
 	}
 }
+
+// TestHugoCompatPartialReturnDict tests partial {{ return (dict ...) }} returning a map.
+func TestHugoCompatPartialReturnDict(t *testing.T) {
+	dir := t.TempDir()
+	layoutsDir := filepath.Join(dir, "layouts")
+	partialsDir := filepath.Join(layoutsDir, "partials")
+	if err := os.MkdirAll(partialsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	dictPartial := `{{ $a := "alpha" }}{{ $b := "beta" }}{{ return (dict "first" $a "second" $b) }}`
+	if err := os.WriteFile(filepath.Join(partialsDir, "getpair.html"), []byte(dictPartial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	callerPartial := `{{- $p := partial "getpair" . -}}{{ $p.first }}-{{ $p.second }}`
+	if err := os.WriteFile(filepath.Join(partialsDir, "caller.html"), []byte(callerPartial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := makeRendererWithLayouts(t, layoutsDir)
+	out, err := r.renderPartialAny("caller", nil)
+	if err != nil {
+		t.Fatalf("renderPartialAny error: %v", err)
+	}
+	if string(out.(template.HTML)) != "alpha-beta" {
+		t.Errorf("partial return dict = %q, want alpha-beta", out)
+	}
+}
+
+// TestHugoCompatPartialReturnSlice tests partial {{ return (slice ...) }} returning a slice.
+func TestHugoCompatPartialReturnSlice(t *testing.T) {
+	dir := t.TempDir()
+	layoutsDir := filepath.Join(dir, "layouts")
+	partialsDir := filepath.Join(layoutsDir, "partials")
+	if err := os.MkdirAll(partialsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	slicePartial := `{{ return (slice "a" "b" "c") }}`
+	if err := os.WriteFile(filepath.Join(partialsDir, "getslice.html"), []byte(slicePartial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	callerPartial := `{{- $s := partial "getslice" . -}}{{ range $s }}{{ . }}{{ end }}`
+	if err := os.WriteFile(filepath.Join(partialsDir, "caller2.html"), []byte(callerPartial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := makeRendererWithLayouts(t, layoutsDir)
+	out, err := r.renderPartialAny("caller2", nil)
+	if err != nil {
+		t.Fatalf("renderPartialAny error: %v", err)
+	}
+	if string(out.(template.HTML)) != "abc" {
+		t.Errorf("partial return slice = %q, want abc", out)
+	}
+}
+
+// TestHugoCompatScratchAdd tests Scratch.Add accumulation.
+func TestHugoCompatScratchAdd(t *testing.T) {
+	s := newScratch()
+	s.Set("count", 0)
+	s.Add("count", 1)
+	s.Add("count", 1)
+	s.Add("count", 1)
+	if v, ok := s.Get("count").(int); !ok || v != 3 {
+		t.Errorf("Scratch.Add int: got %v, want 3", s.Get("count"))
+	}
+
+	s.Set("name", "hello")
+	s.Add("name", " world")
+	if v, ok := s.Get("name").(string); !ok || v != "hello world" {
+		t.Errorf("Scratch.Add string: got %v, want 'hello world'", s.Get("name"))
+	}
+}
+
+// TestHugoCompatScratchSetInMap tests Scratch.SetInMap and GetSortedMapValues.
+func TestHugoCompatScratchSetInMap(t *testing.T) {
+	s := newScratch()
+	s.SetInMap("nav", "about", "About Us")
+	s.SetInMap("nav", "home", "Home")
+	s.SetInMap("nav", "blog", "Blog")
+
+	vals := s.GetSortedMapValues("nav")
+	if len(vals) != 3 {
+		t.Errorf("GetSortedMapValues len = %d, want 3", len(vals))
+	}
+	// Should be sorted by key: about, blog, home
+	if vals[0] != "About Us" {
+		t.Errorf("GetSortedMapValues[0] = %v, want 'About Us'", vals[0])
+	}
+}
+
+// TestHugoCompatWhereOperators tests the where function with various operators.
+func TestHugoCompatWhereOperators(t *testing.T) {
+	r := makeRenderer(t)
+	fm := r.buildFuncMap()
+	whereFn := fm["where"].(func(...any) any)
+
+	site := makeSite()
+	pages := HugoPageList{
+		{Page: &content.Page{Title: "A", Weight: 1}, Site: site},
+		{Page: &content.Page{Title: "B", Weight: 5}, Site: site},
+		{Page: &content.Page{Title: "C", Weight: 10}, Site: site},
+	}
+
+	// Filter with != operator
+	result := whereFn(pages, "Title", "!=", "A")
+	if list, ok := result.(HugoPageList); !ok || len(list) != 2 {
+		t.Errorf("where Title != A: got %v, want 2 items", result)
+	}
+
+	// Filter with in operator
+	result2 := whereFn(pages, "Title", "in", []string{"A", "C"})
+	if list, ok := result2.(HugoPageList); !ok || len(list) != 2 {
+		t.Errorf("where Title in [A,C]: got %v, want 2 items", result2)
+	}
+}
+
+// TestHugoCompatDictAndMerge tests dict and merge functions.
+func TestHugoCompatDictAndMerge(t *testing.T) {
+	r := makeRenderer(t)
+	fm := r.buildFuncMap()
+	dictFn := fm["dict"].(func(...any) map[string]any)
+	mergeFn := fm["merge"].(func(...any) map[string]any)
+
+	d := dictFn("key", "value", "num", 42)
+	if d["key"] != "value" {
+		t.Errorf("dict[key] = %v, want value", d["key"])
+	}
+	if d["num"] != 42 {
+		t.Errorf("dict[num] = %v, want 42", d["num"])
+	}
+
+	merged := mergeFn(d, dictFn("extra", "bonus"))
+	if merged["key"] != "value" || merged["extra"] != "bonus" {
+		t.Errorf("merge result unexpected: %v", merged)
+	}
+}
+
+// TestHugoCompatCond tests the cond function.
+func TestHugoCompatCond(t *testing.T) {
+	r := makeRenderer(t)
+	fm := r.buildFuncMap()
+	condFn := fm["cond"].(func(...any) any)
+
+	if condFn(true, "yes", "no") != "yes" {
+		t.Error("cond(true, yes, no) should be yes")
+	}
+	if condFn(false, "yes", "no") != "no" {
+		t.Error("cond(false, yes, no) should be no")
+	}
+}
+
+// TestHugoCompatHugoPageMethods tests HugoPage accessor methods.
+func TestHugoCompatHugoPageMethods(t *testing.T) {
+	site := makeSite()
+	ts := time.Date(2024, 1, 15, 0, 0, 0, 0, time.UTC)
+	page := &content.Page{
+		Title:       "Test Post",
+		Kind:        "page",
+		Section:     "posts",
+		RelPermalink: "/posts/test-post/",
+		Tags:        []string{"go", "hugo"},
+		Date:        ts,
+	}
+	hp := &HugoPage{Page: page, Site: site}
+
+	if hp.Title != "Test Post" {
+		t.Errorf("HugoPage.Title = %q, want 'Test Post'", hp.Title)
+	}
+	if hp.RelPermalink() != "/posts/test-post/" {
+		t.Errorf("HugoPage.RelPermalink() = %q, want /posts/test-post/", hp.RelPermalink())
+	}
+	if !hp.IsPage() {
+		t.Error("HugoPage.IsPage() should be true for kind=page")
+	}
+	if hp.IsHome() {
+		t.Error("HugoPage.IsHome() should be false for kind=page")
+	}
+	kws := hp.Keywords()
+	if len(kws) != 2 || kws[0] != "go" {
+		t.Errorf("HugoPage.Keywords() = %v, want [go hugo]", kws)
+	}
+	if hp.HasShortcode("foo") {
+		t.Error("HugoPage.HasShortcode should always return false")
+	}
+	if hp.GetPage("some/path") != nil {
+		t.Error("HugoPage.GetPage should return nil")
+	}
+}
+
+// TestHugoCompatTaxonomyList tests site taxonomy access.
+func TestHugoCompatTaxonomyList(t *testing.T) {
+	site := makeSite()
+	site.AllRegularPages = []*content.Page{
+		{Title: "Page 1", Tags: []string{"go", "test"}},
+		{Title: "Page 2", Tags: []string{"go"}},
+		{Title: "Page 3", Tags: []string{"test"}},
+	}
+
+	taxRaw := site.Taxonomies()
+	tagsRaw, ok := taxRaw["tags"]
+	if !ok {
+		t.Fatal("Taxonomies should have 'tags' key")
+	}
+	tags, ok2 := tagsRaw.(map[string]TermEntry)
+	if !ok2 {
+		t.Fatalf("tags type = %T, want map[string]TermEntry", tagsRaw)
+	}
+	if tags["go"].Count != 2 {
+		t.Errorf("tags[go].Count = %d, want 2", tags["go"].Count)
+	}
+	if tags["test"].Count != 2 {
+		t.Errorf("tags[test].Count = %d, want 2", tags["test"].Count)
+	}
+
+	// TermEntry should have Name and Count
+	entry := tags["go"]
+	if entry.Name != "go" {
+		t.Errorf("TermEntry.Name = %q, want go", entry.Name)
+	}
+	if entry.Term != "go" {
+		t.Errorf("TermEntry.Term = %q, want go", entry.Term)
+	}
+	// Pages and Page methods should not panic
+	_ = entry.Pages()
+	_ = entry.Page()
+}
+
+// TestHugoCompatSiteMenus tests site menu access.
+func TestHugoCompatSiteMenus(t *testing.T) {
+	site := makeSite()
+	site.Menus = map[string][]SiteMenuItem{
+		"main": {
+			{Name: "Home", URL: "/", Weight: 1},
+			{Name: "About", URL: "/about/", Weight: 2},
+		},
+	}
+
+	menus := site.Menus
+	main, ok := menus["main"]
+	if !ok {
+		t.Fatal("Menus should have 'main' key")
+	}
+	if len(main) != 2 {
+		t.Errorf("main menu len = %d, want 2", len(main))
+	}
+	if main[0].Name != "Home" {
+		t.Errorf("main[0].Name = %q, want Home", main[0].Name)
+	}
+}
+
+// TestHugoCompatHugoPageListSorting tests HugoPageList sorting methods.
+func TestHugoCompatHugoPageListSorting(t *testing.T) {
+	site := makeSite()
+	ts1 := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	ts2 := time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC)
+	ts3 := time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	pages := HugoPageList{
+		{Page: &content.Page{Title: "Banana", Weight: 2, Date: ts2}, Site: site},
+		{Page: &content.Page{Title: "Apple", Weight: 1, Date: ts1}, Site: site},
+		{Page: &content.Page{Title: "Cherry", Weight: 3, Date: ts3}, Site: site},
+	}
+
+	byTitle := pages.ByTitle()
+	if byTitle[0].Title != "Apple" {
+		t.Errorf("ByTitle[0] = %q, want Apple", byTitle[0].Title)
+	}
+
+	byWeight := pages.ByWeight()
+	if byWeight[0].Title != "Apple" {
+		t.Errorf("ByWeight[0] = %q, want Apple", byWeight[0].Title)
+	}
+
+	reversed := byTitle.Reverse()
+	if reversed[0].Title != "Cherry" {
+		t.Errorf("Reverse[0] = %q, want Cherry", reversed[0].Title)
+	}
+
+	first2 := pages.First(2)
+	if len(first2) != 2 {
+		t.Errorf("First(2) len = %d, want 2", len(first2))
+	}
+
+	last1 := pages.Last(1)
+	if len(last1) != 1 {
+		t.Errorf("Last(1) len = %d, want 1", len(last1))
+	}
+}

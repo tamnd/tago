@@ -628,8 +628,40 @@ func (s *SiteData) Data() safeDataMap {
 // safeDataMap is a map[string]any alias used for .Site.Data; returns empty self for missing keys.
 type safeDataMap map[string]any
 
-// Taxonomies returns empty map (stub for .Site.Taxonomies).
-func (s *SiteData) Taxonomies() map[string]any { return nil }
+// Taxonomies builds a Hugo-compatible taxonomy map from site pages.
+// Returns map[taxName]map[termName]TermEntry.
+func (s *SiteData) Taxonomies() map[string]any {
+	out := map[string]any{}
+	// tags taxonomy
+	tagCounts := map[string]int{}
+	for _, p := range s.AllRegularPages {
+		for _, tag := range p.Tags {
+			tagCounts[tag]++
+		}
+	}
+	if len(tagCounts) > 0 {
+		entries := map[string]TermEntry{}
+		for name, count := range tagCounts {
+			entries[name] = TermEntry{Name: name, Count: count, Term: name}
+		}
+		out["tags"] = entries
+	}
+	// categories taxonomy
+	catCounts := map[string]int{}
+	for _, p := range s.AllRegularPages {
+		for _, cat := range p.Categories {
+			catCounts[cat]++
+		}
+	}
+	if len(catCounts) > 0 {
+		entries := map[string]TermEntry{}
+		for name, count := range catCounts {
+			entries[name] = TermEntry{Name: name, Count: count, Term: name}
+		}
+		out["categories"] = entries
+	}
+	return out
+}
 
 // Home returns a fake home page stub for .Site.Home.RelPermalink etc.
 func (s *SiteData) Home() *siteHomeStub {
