@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -88,10 +90,253 @@ func (hp *HugoPage) IsHome() bool { return hp.Page.Kind == "home" }
 // IsSection returns true if page kind is "section".
 func (hp *HugoPage) IsSection() bool { return hp.Page.Kind == "section" }
 
+// Param looks up a param key in page params, then site params.
+func (hp *HugoPage) Param(key string) any {
+	if hp.Page != nil && hp.Page.Params != nil {
+		if v, ok := hp.Page.Params[key]; ok {
+			return v
+		}
+	}
+	if hp.Site != nil && hp.Site.Params != nil {
+		if v, ok := hp.Site.Params[key]; ok {
+			return v
+		}
+	}
+	return nil
+}
+
+// Params returns the page's front matter params map.
+func (hp *HugoPage) Params() map[string]any {
+	if hp.Page == nil {
+		return nil
+	}
+	return hp.Page.Params
+}
+
+// Language returns the site language.
+func (hp *HugoPage) Language() *SiteLanguage {
+	if hp.Site != nil {
+		return hp.Site.Language
+	}
+	return nil
+}
+
+// Data returns page data (for taxonomy pages).
+func (hp *HugoPage) Data() *PageData {
+	return &PageData{Terms: &TermsData{}}
+}
+
+// Scratch returns a stub scratch pad.
+func (hp *HugoPage) Scratch() map[string]any { return map[string]any{} }
+
+// TableOfContents returns empty (stub).
+func (hp *HugoPage) TableOfContents() template.HTML { return "" }
+
+// Summary returns the page summary.
+func (hp *HugoPage) Summary() string {
+	if hp.Page != nil {
+		return hp.Page.Summary
+	}
+	return ""
+}
+
+// Description returns the page description.
+func (hp *HugoPage) Description() string {
+	if hp.Page != nil {
+		return hp.Page.Description
+	}
+	return ""
+}
+
+// Content returns the rendered page content.
+func (hp *HugoPage) Content() template.HTML {
+	if hp.Page != nil {
+		return template.HTML(hp.Page.ContentHTML)
+	}
+	return ""
+}
+
+// WordCount returns the word count.
+func (hp *HugoPage) WordCount() int {
+	if hp.Page != nil {
+		return hp.Page.WordCount
+	}
+	return 0
+}
+
+// ReadingTime returns estimated reading time in minutes.
+func (hp *HugoPage) ReadingTime() int {
+	if hp.Page != nil {
+		return hp.Page.ReadingTime
+	}
+	return 0
+}
+
+// Resources returns an empty page resources stub.
+func (hp *HugoPage) Resources() *pageResourcesStub { return &pageResourcesStub{} }
+
+// File returns a stub file info object.
+func (hp *HugoPage) File() *pageFileStub {
+	if hp.Page == nil {
+		return &pageFileStub{}
+	}
+	return &pageFileStub{filePath: hp.Page.FilePath}
+}
+
+// Translations returns empty (no multilingual support).
+func (hp *HugoPage) Translations() []any { return nil }
+
+// IsTranslated returns false.
+func (hp *HugoPage) IsTranslated() bool { return false }
+
+// AllTranslations returns empty.
+func (hp *HugoPage) AllTranslations() []any { return nil }
+
+// Next returns next sibling page.
+func (hp *HugoPage) Next() *content.Page {
+	if hp.Page != nil {
+		return hp.Page.NextPage
+	}
+	return nil
+}
+
+// Prev returns previous sibling page.
+func (hp *HugoPage) Prev() *content.Page {
+	if hp.Page != nil {
+		return hp.Page.PrevPage
+	}
+	return nil
+}
+
+// Kind returns the page kind.
+func (hp *HugoPage) Kind() string {
+	if hp.Page != nil {
+		return hp.Page.Kind
+	}
+	return ""
+}
+
+// Type returns the content type.
+func (hp *HugoPage) Type() string {
+	if hp.Page != nil {
+		return hp.Page.Type
+	}
+	return ""
+}
+
+// Section returns the root section.
+func (hp *HugoPage) Section() string {
+	if hp.Page != nil {
+		return hp.Page.Section
+	}
+	return ""
+}
+
+// LinkTitle returns the link title.
+func (hp *HugoPage) LinkTitle() string {
+	if hp.Page == nil {
+		return ""
+	}
+	if hp.Page.LinkTitle != "" {
+		return hp.Page.LinkTitle
+	}
+	return hp.Page.Title
+}
+
+// Draft returns whether the page is a draft.
+func (hp *HugoPage) Draft() bool {
+	if hp.Page != nil {
+		return hp.Page.Draft
+	}
+	return false
+}
+
+// Weight returns the page weight.
+func (hp *HugoPage) Weight() int {
+	if hp.Page != nil {
+		return hp.Page.Weight
+	}
+	return 0
+}
+
+// Path returns the page URL path.
+func (hp *HugoPage) Path() string {
+	if hp.Page != nil {
+		return hp.Page.RelPermalink
+	}
+	return ""
+}
+
+// Lang returns the language code.
+func (hp *HugoPage) Lang() string {
+	if hp.Page != nil {
+		return hp.Page.Lang
+	}
+	return ""
+}
+
+// GitInfo returns nil (stub).
+func (hp *HugoPage) GitInfo() any { return nil }
+
+// Ancestors returns ancestor pages.
+func (hp *HugoPage) Ancestors() PageList {
+	if hp.Page != nil {
+		return PageList(hp.Page.Ancestors)
+	}
+	return nil
+}
+
+// Parent returns the parent page.
+func (hp *HugoPage) Parent() *content.Page {
+	if hp.Page != nil {
+		return hp.Page.Parent
+	}
+	return nil
+}
+
+// BundleType returns empty (stub).
+func (hp *HugoPage) BundleType() string { return "" }
+
+// OutputFormats returns a stub.
+func (hp *HugoPage) OutputFormats() *outputFormatsStub { return &outputFormatsStub{} }
+
+// AlternativeOutputFormats returns a stub.
+func (hp *HugoPage) AlternativeOutputFormats() *outputFormatsStub { return &outputFormatsStub{} }
+
+// RegularPages returns an empty list (stub for sections).
+func (hp *HugoPage) RegularPages() HugoPageList { return nil }
+
+// Pages returns an empty list (stub for sections in range).
+func (hp *HugoPage) Pages() HugoPageList { return nil }
+
+// Store returns an empty map.
+func (hp *HugoPage) Store() map[string]any { return map[string]any{} }
+
+// IsNode returns true if this is a list/section/home page.
+func (hp *HugoPage) IsNode() bool {
+	if hp.Page != nil {
+		return hp.Page.IsNode()
+	}
+	return false
+}
+
+// FuzzyWordCount returns word count rounded to nearest 100.
+func (hp *HugoPage) FuzzyWordCount() int {
+	if hp.Page != nil {
+		return hp.Page.FuzzyWordCount()
+	}
+	return 0
+}
+
+// Truncated returns whether the page content was truncated for summary.
+func (hp *HugoPage) Truncated() bool { return false }
+
 // PageData mirrors Hugo's .Data field on taxonomy/term pages (provides .Pages and .Terms).
 type PageData struct {
 	Pages    HugoPageList
 	Terms    *TermsData
+	Singular string // taxonomy type singular name, e.g. "tag"
+	Plural   string // taxonomy type plural name, e.g. "tags"
 }
 
 // TermsData wraps taxonomy terms and provides Hugo-compatible methods.
@@ -263,6 +508,7 @@ func (h *siteHomeStub) Lastmod() HugoTime         { return HugoTime{} }
 
 // LastChange returns zero time (stub for .Site.LastChange).
 func (s *SiteData) LastChange() time.Time { return time.Time{} }
+func (s *SiteData) Lastmod() HugoTime     { return HugoTime{} }
 
 // Param looks up a param in Site.Params (Hugo .Param method falls through to site).
 func (s *SiteData) Param(key string) any {
@@ -585,18 +831,44 @@ func (d *TemplateData) Parent() *content.Page {
 	return d.Page.Parent
 }
 
-func (d *TemplateData) Ancestors() []*content.Page {
+// PageList is a slice of pages with Hugo-compatible methods.
+type PageList []*content.Page
+
+func (pl PageList) Reverse() PageList {
+	n := len(pl)
+	out := make(PageList, n)
+	for i, p := range pl {
+		out[n-1-i] = p
+	}
+	return out
+}
+
+func (pl PageList) First(n int) PageList {
+	if n >= len(pl) {
+		return pl
+	}
+	return pl[:n]
+}
+
+func (pl PageList) Last(n int) PageList {
+	if n >= len(pl) {
+		return pl
+	}
+	return pl[len(pl)-n:]
+}
+
+func (d *TemplateData) Ancestors() PageList {
 	if d.Page == nil {
 		return nil
 	}
-	return d.Page.Ancestors
+	return PageList(d.Page.Ancestors)
 }
 
 // RegularPages returns only kind=page children (for section/home templates).
 func (d *TemplateData) RegularPages() HugoPageList {
 	var out HugoPageList
 	for _, p := range d.Pages {
-		if p.Kind == "page" {
+		if p.Page != nil && p.Page.Kind == "page" {
 			out = append(out, p)
 		}
 	}
@@ -643,9 +915,20 @@ func (d *TemplateData) Language() *SiteLanguage {
 
 // Data returns Hugo-compatible .Data field (for taxonomy/term pages).
 func (d *TemplateData) Data() *PageData {
+	section := ""
+	if d.Page != nil {
+		section = d.Page.Section
+	}
+	// Derive singular from plural (naive: strip trailing 's').
+	singular := section
+	if len(singular) > 0 && singular[len(singular)-1] == 's' {
+		singular = singular[:len(singular)-1]
+	}
 	return &PageData{
-		Pages: d.Pages,
-		Terms: &TermsData{terms: d.Tags},
+		Pages:    d.Pages,
+		Terms:    &TermsData{terms: d.Tags},
+		Singular: singular,
+		Plural:   section,
 	}
 }
 
@@ -703,6 +986,38 @@ func (d *TemplateData) PrevInSection() *content.Page {
 func (d *TemplateData) TableOfContents() template.HTML {
 	return ""
 }
+
+// Paginate returns a stub Paginator for the given collection.
+func (d *TemplateData) Paginate(pages any, args ...any) *paginatorStub {
+	return &paginatorStub{pages: d.Pages}
+}
+
+// Paginator returns a stub Paginator object.
+func (d *TemplateData) Paginator(args ...any) *paginatorStub {
+	return &paginatorStub{pages: d.Pages}
+}
+
+// paginatorStub provides Hugo-compatible Paginator interface.
+type paginatorStub struct {
+	pages HugoPageList
+}
+
+func (p *paginatorStub) Pages() HugoPageList      { return p.pages }
+func (p *paginatorStub) PageNumber() int           { return 1 }
+func (p *paginatorStub) TotalPages() int           { return 1 }
+func (p *paginatorStub) TotalNumberOfElements() int { return len(p.pages) }
+func (p *paginatorStub) NumberOfElements() int     { return len(p.pages) }
+func (p *paginatorStub) HasNext() bool             { return false }
+func (p *paginatorStub) HasPrev() bool             { return false }
+func (p *paginatorStub) Next() *paginatorStub      { return nil }
+func (p *paginatorStub) Prev() *paginatorStub      { return nil }
+func (p *paginatorStub) First() *paginatorStub     { return p }
+func (p *paginatorStub) Last() *paginatorStub      { return p }
+func (p *paginatorStub) Pagers() []*paginatorStub  { return []*paginatorStub{p} }
+func (p *paginatorStub) URL() string               { return "" }
+func (p *paginatorStub) RelPermalink() string      { return "" }
+func (p *paginatorStub) Permalink() string         { return "" }
+func (p *paginatorStub) PageSize() int             { return 10 }
 
 // File returns a stub file info object (stub for Hugo .File).
 func (d *TemplateData) File() *pageFileStub {
@@ -1003,6 +1318,33 @@ func toInt(v any) (int, bool) {
 }
 
 // inCollection checks if val is in collection.
+// isTruthy mirrors Go template truthiness: nil, false, 0, "", empty slices/maps are falsy.
+func isTruthy(v any) bool {
+	if v == nil {
+		return false
+	}
+	switch t := v.(type) {
+	case bool:
+		return t
+	case int:
+		return t != 0
+	case int64:
+		return t != 0
+	case float64:
+		return t != 0
+	case string:
+		return t != ""
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Slice, reflect.Array, reflect.Map:
+		return rv.Len() > 0
+	case reflect.Ptr, reflect.Interface:
+		return !rv.IsNil()
+	}
+	return true
+}
+
 func inCollection(collection any, val any) bool {
 	if collection == nil {
 		return false
@@ -1262,6 +1604,31 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 		},
 		"truncate": truncateWords,
 		"plainify": plainify,
+		"substr": func(s any, start any, args ...any) string {
+			str := fmt.Sprintf("%v", s)
+			runes := []rune(str)
+			st, _ := start.(int)
+			if st < 0 {
+				st = max(0, len(runes)+st)
+			}
+			if st > len(runes) {
+				return ""
+			}
+			if len(args) > 0 {
+				length, _ := args[0].(int)
+				end := st + length
+				if end > len(runes) {
+					end = len(runes)
+				}
+				return string(runes[st:end])
+			}
+			return string(runes[st:])
+		},
+		"fileExists": func(path string) bool {
+			_, err := os.Stat(path)
+			return err == nil
+		},
+		"os": func() *osNamespace { return &osNamespace{} },
 
 		// strings.* namespace (dot-notation names)
 		"stringsContains":   strings.Contains,
@@ -1274,18 +1641,29 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 		"printf": fmt.Sprintf,
 
 		// URL functions
-		"absURL": func(path string) string {
+		"absURL": func(path any) string {
+			if path == nil {
+				return ""
+			}
+			p := fmt.Sprintf("%v", path)
 			base := strings.TrimRight(r.site.BaseURL, "/")
-			if strings.HasPrefix(path, "/") {
-				return base + path
+			if strings.HasPrefix(p, "http://") || strings.HasPrefix(p, "https://") {
+				return p
 			}
-			return base + "/" + path
+			if strings.HasPrefix(p, "/") {
+				return base + p
+			}
+			return base + "/" + p
 		},
-		"relURL": func(path string) string {
-			if strings.HasPrefix(path, "/") {
-				return path
+		"relURL": func(path any) string {
+			if path == nil {
+				return ""
 			}
-			return "/" + path
+			p := fmt.Sprintf("%v", path)
+			if strings.HasPrefix(p, "/") {
+				return p
+			}
+			return "/" + p
 		},
 
 		// Date/time
@@ -1358,6 +1736,25 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 			return val
 		},
 		"in":        inCollection,
+		"merge": func(args ...any) map[string]any {
+			cn := &collectionsNamespace{}
+			if len(args) == 2 {
+				return cn.Merge(args[0], args[1])
+			}
+			return map[string]any{}
+		},
+		// apply maps a function over a collection. Stub returns empty slice.
+		"apply": func(collection any, fn string, args ...any) []any {
+			rv := reflect.ValueOf(collection)
+			if !rv.IsValid() || (rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array) {
+				return nil
+			}
+			result := make([]any, rv.Len())
+			for i := 0; i < rv.Len(); i++ {
+				result[i] = rv.Index(i).Interface()
+			}
+			return result
+		},
 		"intersect": func(a, b []string) []string {
 			set := make(map[string]bool, len(b))
 			for _, s := range b {
@@ -1420,16 +1817,38 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 			}
 			return result
 		},
-		"cond": func(condition bool, a, b any) any {
-			if condition {
+		"cond": func(condition any, a, b any) any {
+			if isTruthy(condition) {
 				return a
 			}
 			return b
 		},
 
 		// Encoding
-		"jsonify": func(v any) string {
-			b, err := json.Marshal(v)
+		"jsonify": func(args ...any) string {
+			if len(args) == 0 {
+				return "null"
+			}
+			var v any
+			var indent string
+			if len(args) == 1 {
+				v = args[0]
+			} else {
+				// 2-arg form: jsonify options data
+				v = args[len(args)-1]
+				if opts, ok := args[0].(map[string]any); ok {
+					if ind, ok := opts["indent"].(string); ok {
+						indent = ind
+					}
+				}
+			}
+			var b []byte
+			var err error
+			if indent != "" {
+				b, err = json.MarshalIndent(v, "", indent)
+			} else {
+				b, err = json.Marshal(v)
+			}
 			if err != nil {
 				return ""
 			}
@@ -1506,21 +1925,21 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 	}
 
 	// partial: load and render a partial template
-	fm["partial"] = func(name string, args ...any) (template.HTML, error) {
+	fm["partial"] = func(name string, args ...any) (any, error) {
 		var ctx any
 		if len(args) > 0 {
 			ctx = args[0]
 		}
-		return r.renderPartial(name, ctx)
+		return r.renderPartialAny(name, ctx)
 	}
 
 	// partialCached: like partial but caches by key (args[0] is ctx, rest are cache keys)
-	fm["partialCached"] = func(name string, args ...any) (template.HTML, error) {
+	fm["partialCached"] = func(name string, args ...any) (any, error) {
 		var ctx any
 		if len(args) > 0 {
 			ctx = args[0]
 		}
-		return r.renderPartial(name, ctx)
+		return r.renderPartialAny(name, ctx)
 	}
 
 	// i18n: return translated string or the key itself (stub without actual i18n files)
@@ -1615,7 +2034,17 @@ func (r *Renderer) buildFuncMap() template.FuncMap {
 	fm["lang"] = func() *langNamespace { return &langNamespace{r: r} }
 
 	// return: Hugo 0.117+ partial return value (stub - no-op in standard Go templates)
-	fm["return"] = func(v ...any) string { return "" }
+	fm["return"] = func(v ...any) string {
+		var val any
+		if len(v) > 0 {
+			val = v[0]
+		}
+		// Store the return value keyed by goroutine ID so renderPartialAny can retrieve it.
+		// Then panic so template execution stops; the template engine catches the panic
+		// and returns it as an error, which renderPartialAny detects and suppresses.
+		partialReturnStore.Store(goroutineID(), val)
+		panic(partialReturn{value: val})
+	}
 
 	// strings namespace (Hugo 0.XX+)
 	fm["strings"] = func() *stringsNamespace { return &stringsNamespace{} }
@@ -1647,9 +2076,13 @@ func (h *hugoNamespace) IsServer() bool      { return false }
 func (h *hugoNamespace) Generator() template.HTML {
 	return template.HTML(`<meta name="generator" content="Hugo 0.147.0">`)
 }
-func (h *hugoNamespace) BuildDate() string { return "" }
-func (h *hugoNamespace) CommitHash() string { return "" }
-func (h *hugoNamespace) Environment() string { return "development" }
+func (h *hugoNamespace) BuildDate() string      { return "" }
+func (h *hugoNamespace) CommitHash() string     { return "" }
+func (h *hugoNamespace) Environment() string    { return "development" }
+func (h *hugoNamespace) IsMultilingual() bool   { return false }
+func (h *hugoNamespace) IsExtended() bool       { return false }
+func (h *hugoNamespace) WorkingDir() string     { return "" }
+func (h *hugoNamespace) Deps() map[string]any   { return nil }
 
 // stubResource is the result of any resources pipeline step.
 // All methods return the same stub so pipelines like
@@ -2583,7 +3016,47 @@ func (r *Renderer) i18nLookup(key string) string {
 }
 
 // renderPartial renders a named partial template with the given context.
+// partialReturnStore maps goroutine ID -> returned value for partial {{ return }}.
+var partialReturnStore sync.Map
+
+// goroutineID returns the current goroutine's numeric ID via runtime.Stack.
+func goroutineID() int64 {
+	var buf [32]byte
+	n := runtime.Stack(buf[:], false)
+	s := strings.TrimPrefix(string(buf[:n]), "goroutine ")
+	if idx := strings.IndexByte(s, ' '); idx > 0 {
+		id, err := strconv.ParseInt(s[:idx], 10, 64)
+		if err == nil {
+			return id
+		}
+	}
+	return 0
+}
+
+// partialReturn is a sentinel panic value used to implement Hugo's {{ return }} in partials.
+type partialReturn struct{ value any }
+
 func (r *Renderer) renderPartial(name string, ctx any) (template.HTML, error) {
+	result, err := r.renderPartialAny(name, ctx)
+	if err != nil {
+		return "", err
+	}
+	switch v := result.(type) {
+	case template.HTML:
+		return v, nil
+	case string:
+		return template.HTML(v), nil
+	case nil:
+		return "", nil
+	default:
+		// Non-HTML return (e.g. slice/map from {{ return $value }}).
+		// Encode as JSON so it can be used in HTML context safely.
+		return template.HTML(fmt.Sprintf("%v", v)), nil
+	}
+}
+
+// renderPartialAny is like renderPartial but returns any (including slices from {{ return }}).
+func (r *Renderer) renderPartialAny(name string, ctx any) (result any, err error) {
 	if !strings.HasSuffix(name, ".html") {
 		name = name + ".html"
 	}
@@ -2598,7 +3071,7 @@ func (r *Renderer) renderPartial(name string, ctx any) (template.HTML, error) {
 			// Try both classic (partials/) and newer Hugo convention (_partials/)
 			for _, dir := range []string{"partials", "_partials"} {
 				partialPath := filepath.Join(r.layoutsDir, dir, name)
-				if data, err := os.ReadFile(partialPath); err == nil {
+				if data, readErr := os.ReadFile(partialPath); readErr == nil {
 					partialContent = string(data)
 					break
 				}
@@ -2606,12 +3079,12 @@ func (r *Renderer) renderPartial(name string, ctx any) (template.HTML, error) {
 		}
 		if partialContent == "" {
 			// Silently return empty for missing partials (common for optional partials like comments)
-			return "", nil
+			return template.HTML(""), nil
 		}
 
-		parsed, err := template.New(name).Funcs(r.funcMap).Parse(partialContent)
-		if err != nil {
-			return "", fmt.Errorf("parse partial %q: %w", name, err)
+		parsed, parseErr := template.New(name).Funcs(r.funcMap).Parse(partialContent)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse partial %q: %w", name, parseErr)
 		}
 
 		// Register Hugo _internal/ templates into this partial's set.
@@ -2627,9 +3100,16 @@ func (r *Renderer) renderPartial(name string, ctx any) (template.HTML, error) {
 		t = parsed
 	}
 
+	gid := goroutineID()
 	var buf bytes.Buffer
-	if err := t.Execute(&buf, ctx); err != nil {
-		return "", fmt.Errorf("execute partial %q: %w", name, err)
+	execErr := t.Execute(&buf, ctx)
+
+	// Check if {{ return }} was called; if so, use the stored value.
+	if val, ok := partialReturnStore.LoadAndDelete(gid); ok {
+		return val, nil
+	}
+	if execErr != nil {
+		return nil, fmt.Errorf("execute partial %q: %w", name, execErr)
 	}
 	return template.HTML(buf.String()), nil
 }

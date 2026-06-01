@@ -98,6 +98,16 @@ type Page struct {
 // IsHome reports whether this is the site home page.
 func (p *Page) IsHome() bool { return p.Kind == "home" }
 
+// Path returns the logical path of the page (its RelPermalink).
+func (p *Page) Path() string { return p.RelPermalink }
+
+// ContentBaseName returns the base name of the content file (without extension).
+func (p *Page) ContentBaseName() string {
+	base := filepath.Base(p.FilePath)
+	ext := filepath.Ext(base)
+	return base[:len(base)-len(ext)]
+}
+
 // IsPage reports whether this is a regular content page.
 func (p *Page) IsPage() bool { return p.Kind == "page" }
 

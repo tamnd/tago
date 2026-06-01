@@ -157,7 +157,7 @@ func TestFuncDateFormat(t *testing.T) {
 func TestFuncAbsURL(t *testing.T) {
 	r := makeRenderer(t)
 	fm := r.buildFuncMap()
-	absURLFn := fm["absURL"].(func(string) string)
+	absURLFn := fm["absURL"].(func(any) string)
 
 	got := absURLFn("/posts/hello/")
 	if !strings.HasPrefix(got, "http://localhost:1313/") {
@@ -168,7 +168,7 @@ func TestFuncAbsURL(t *testing.T) {
 func TestFuncRelURL(t *testing.T) {
 	r := makeRenderer(t)
 	fm := r.buildFuncMap()
-	relURLFn := fm["relURL"].(func(string) string)
+	relURLFn := fm["relURL"].(func(any) string)
 
 	got := relURLFn("posts/hello/")
 	if got != "/posts/hello/" {
@@ -263,7 +263,7 @@ func TestFuncSort(t *testing.T) {
 func TestFuncJsonify(t *testing.T) {
 	r := makeRenderer(t)
 	fm := r.buildFuncMap()
-	jsonifyFn := fm["jsonify"].(func(any) string)
+	jsonifyFn := fm["jsonify"].(func(...any) string)
 
 	got := jsonifyFn(map[string]any{"key": "value"})
 	if !strings.Contains(got, "key") {
@@ -285,7 +285,7 @@ func TestFuncDict(t *testing.T) {
 func TestFuncCond(t *testing.T) {
 	r := makeRenderer(t)
 	fm := r.buildFuncMap()
-	condFn := fm["cond"].(func(bool, any, any) any)
+	condFn := fm["cond"].(func(any, any, any) any)
 
 	if condFn(true, "yes", "no") != "yes" {
 		t.Error("cond(true, ...) should return first value")
