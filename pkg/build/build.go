@@ -340,8 +340,8 @@ func Build(cfg *Config) (*Stats, error) {
 		Description:  cfg.SiteDesc,
 		EditURLBase:  cfg.EditURLBase,
 		Params:       cfg.Params,
-		Pages:        pageSlice,
-		RegularPages: regularPages,
+		AllPages:        pageSlice,
+		AllRegularPages: regularPages,
 		LanguageCode: lang,
 		Language: &render.SiteLanguage{
 			Lang:              lang,
