@@ -2,16 +2,25 @@ package render
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"html/template"
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/extension"
+	"github.com/yuin/goldmark/parser"
+	"github.com/yuin/goldmark/renderer/html"
 
 	"github.com/tamnd/tago/pkg/content"
 	"github.com/tamnd/tago/pkg/index"
@@ -19,11 +28,13 @@ import (
 
 // SiteData holds site-wide metadata available to all templates.
 type SiteData struct {
-	Title       string
-	BaseURL     string
-	Description string
-	EditURLBase string
-	Params      map[string]any // .Site.Params — from [params] in tago.toml
+	Title        string
+	BaseURL      string
+	Description  string
+	EditURLBase  string
+	Params       map[string]any  // .Site.Params — from [params] in tago.toml
+	Pages        []*content.Page // all pages (set by Build)
+	RegularPages []*content.Page // kind=page only (set by Build)
 }
 
 // AssetRefs holds fingerprinted asset URLs.
@@ -72,23 +83,28 @@ type TemplateData struct {
 
 // Renderer handles template rendering.
 type Renderer struct {
-	site        *SiteData
-	assets      AssetRefs
-	layoutsDir  string
-	liveReload  bool
-	tmplCache   map[string]*template.Template
-	tmplMu      sync.Mutex
+	site          *SiteData
+	assets        AssetRefs
+	layoutsDir    string
+	liveReload    bool
+	tmplCache     map[string]*template.Template
+	partialCache  map[string]*template.Template
+	tmplMu        sync.Mutex
+	funcMap       template.FuncMap
 }
 
 // New creates a new Renderer.
 func New(site *SiteData, assets AssetRefs, layoutsDir string, liveReload bool) *Renderer {
-	return &Renderer{
-		site:       site,
-		assets:     assets,
-		layoutsDir: layoutsDir,
-		liveReload: liveReload,
-		tmplCache:  make(map[string]*template.Template),
+	r := &Renderer{
+		site:         site,
+		assets:       assets,
+		layoutsDir:   layoutsDir,
+		liveReload:   liveReload,
+		tmplCache:    make(map[string]*template.Template),
+		partialCache: make(map[string]*template.Template),
 	}
+	r.funcMap = r.buildFuncMap()
+	return r
 }
 
 // determineSidebarRoot returns the page whose children tree should fill the sidebar.
@@ -154,69 +170,705 @@ func buildSidebarItems(root *content.Page, currentURL string) []*SidebarItem {
 	return items
 }
 
-var funcMap = template.FuncMap{
-	"rawHTML": func(s string) template.HTML {
+// markdownify renders a markdown snippet to HTML using goldmark.
+func markdownifyString(s string) template.HTML {
+	md := goldmark.New(
+		goldmark.WithExtensions(extension.GFM),
+		goldmark.WithParserOptions(parser.WithAutoHeadingID()),
+		goldmark.WithRendererOptions(html.WithUnsafe()),
+	)
+	var buf bytes.Buffer
+	if err := md.Convert([]byte(s), &buf); err != nil {
 		return template.HTML(s)
-	},
-	"safeJS": func(s string) template.JS {
-		return template.JS(s)
-	},
-	"formatDate": func(t time.Time) string {
-		if t.IsZero() {
-			return ""
-		}
-		return t.Format("Jan 2, 2006")
-	},
-	"urlize": func(s string) string {
-		s = strings.ToLower(s)
-		s = strings.ReplaceAll(s, " ", "-")
-		var b strings.Builder
-		for _, r := range s {
-			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
-				b.WriteRune(r)
-			}
-		}
-		return b.String()
-	},
-	"trimSlash": func(s string) string {
-		return strings.TrimRight(s, "/")
-	},
-	"tagFontSize": func(count int) float64 {
-		base := 0.8
-		scale := math.Log1p(float64(count)) * 0.3
-		size := base + scale
-		if size > 2.0 {
-			size = 2.0
-		}
-		return math.Round(size*10) / 10
-	},
-	"safeURL": func(s string) template.URL {
-		return template.URL(s)
-	},
-	"add": func(a, b int) int { return a + b },
-	"sub": func(a, b int) int { return a - b },
-	"mul": func(a, b int) int { return a * b },
-	"dict": func(pairs ...any) map[string]any {
-		m := make(map[string]any)
-		for i := 0; i+1 < len(pairs); i += 2 {
-			if key, ok := pairs[i].(string); ok {
-				m[key] = pairs[i+1]
-			}
-		}
-		return m
-	},
-	"hasPrefix": strings.HasPrefix,
-	"hasSuffix": strings.HasSuffix,
+	}
+	return template.HTML(buf.String())
 }
 
-// getTemplate returns a compiled template for the given kind.
-// It first checks layoutsDir, then falls back to embedded defaults.
+// plainify strips HTML tags from a string.
+func plainify(s string) string {
+	re := regexp.MustCompile(`<[^>]+>`)
+	return re.ReplaceAllString(s, "")
+}
+
+// humanize converts "my-post" or "my_post" to "My post".
+func humanize(s string) string {
+	s = strings.ReplaceAll(s, "-", " ")
+	s = strings.ReplaceAll(s, "_", " ")
+	if s == "" {
+		return s
+	}
+	runes := []rune(s)
+	runes[0] = unicode.ToUpper(runes[0])
+	return string(runes)
+}
+
+// titleCase converts a string to Title Case using simple word splitting.
+func titleCase(s string) string {
+	words := strings.Fields(s)
+	for i, w := range words {
+		if len(w) > 0 {
+			runes := []rune(w)
+			runes[0] = unicode.ToUpper(runes[0])
+			words[i] = string(runes)
+		}
+	}
+	return strings.Join(words, " ")
+}
+
+// truncateWords truncates a string at a word boundary.
+func truncateWords(maxLen int, s string) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	truncated := s[:maxLen]
+	// find last space
+	idx := strings.LastIndex(truncated, " ")
+	if idx > 0 {
+		truncated = truncated[:idx]
+	}
+	return truncated + "..."
+}
+
+// wherePages filters pages where field == value.
+func wherePages(pages []*content.Page, field string, value any) []*content.Page {
+	var result []*content.Page
+	for _, p := range pages {
+		if p == nil {
+			continue
+		}
+		if pageFieldMatches(p, field, value) {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
+// pageFieldMatches checks if a page field equals the given value.
+func pageFieldMatches(p *content.Page, field string, value any) bool {
+	// Handle Params.xxx and .Params.xxx
+	if strings.HasPrefix(field, "Params.") || strings.HasPrefix(field, ".Params.") {
+		key := strings.TrimPrefix(field, ".Params.")
+		key = strings.TrimPrefix(key, "Params.")
+		if p.Params == nil {
+			return false
+		}
+		v, ok := p.Params[key]
+		if !ok {
+			return false
+		}
+		return reflect.DeepEqual(v, value)
+	}
+
+	// Use reflection for struct fields
+	rv := reflect.ValueOf(p)
+	if rv.Kind() == reflect.Pointer {
+		rv = rv.Elem()
+	}
+	fv := rv.FieldByName(field)
+	if !fv.IsValid() {
+		return false
+	}
+	return reflect.DeepEqual(fv.Interface(), value)
+}
+
+// sortPages sorts pages by key (default: Date desc).
+func sortPages(pages []*content.Page, key ...string) []*content.Page {
+	result := make([]*content.Page, len(pages))
+	copy(result, pages)
+
+	sortKey := "Date"
+	if len(key) > 0 && key[0] != "" {
+		sortKey = key[0]
+	}
+
+	sort.SliceStable(result, func(i, j int) bool {
+		a, b := result[i], result[j]
+		if a == nil || b == nil {
+			return a != nil
+		}
+		switch sortKey {
+		case "Title":
+			return a.Title < b.Title
+		case "Weight":
+			return a.Weight < b.Weight
+		case "Lastmod":
+			return a.Lastmod.After(b.Lastmod)
+		case "PublishDate":
+			return a.PublishDate.After(b.PublishDate)
+		default: // Date desc
+			return a.Date.After(b.Date)
+		}
+	})
+	return result
+}
+
+// indexInto indexes into a map or slice by key.
+func indexInto(collection any, key any) any {
+	if collection == nil {
+		return nil
+	}
+	rv := reflect.ValueOf(collection)
+	switch rv.Kind() {
+	case reflect.Map:
+		kv := reflect.ValueOf(key)
+		val := rv.MapIndex(kv)
+		if !val.IsValid() {
+			return nil
+		}
+		return val.Interface()
+	case reflect.Slice, reflect.Array:
+		idx, ok := toInt(key)
+		if !ok || idx < 0 || idx >= rv.Len() {
+			return nil
+		}
+		return rv.Index(idx).Interface()
+	}
+	return nil
+}
+
+// toInt converts any numeric type to int.
+func toInt(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case int32:
+		return int(n), true
+	case float64:
+		return int(n), true
+	case float32:
+		return int(n), true
+	}
+	return 0, false
+}
+
+// inCollection checks if val is in collection.
+func inCollection(collection any, val any) bool {
+	if collection == nil {
+		return false
+	}
+	rv := reflect.ValueOf(collection)
+	switch rv.Kind() {
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < rv.Len(); i++ {
+			if reflect.DeepEqual(rv.Index(i).Interface(), val) {
+				return true
+			}
+		}
+	case reflect.Map:
+		kv := reflect.ValueOf(val)
+		return rv.MapIndex(kv).IsValid()
+	case reflect.String:
+		s, ok := val.(string)
+		if ok {
+			return strings.Contains(rv.String(), s)
+		}
+	}
+	return false
+}
+
+// isZero reports whether a value is considered empty/zero.
+func isZero(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.String:
+		return rv.String() == ""
+	case reflect.Bool:
+		return !rv.Bool()
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return rv.Int() == 0
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return rv.Uint() == 0
+	case reflect.Float32, reflect.Float64:
+		return rv.Float() == 0
+	case reflect.Slice, reflect.Map, reflect.Array:
+		return rv.Len() == 0
+	case reflect.Pointer, reflect.Interface:
+		return rv.IsNil()
+	}
+	return false
+}
+
+// dateFormatLayouts maps Hugo named layouts to Go time format strings.
+var dateFormatLayouts = map[string]string{
+	":date_long":   "January 2, 2006",
+	":date_medium": "Jan 2, 2006",
+	":date_short":  "01/02/06",
+	":time":        "15:04:05",
+}
+
+// buildFuncMap builds the full template function map for this renderer.
+func (r *Renderer) buildFuncMap() template.FuncMap {
+	fm := template.FuncMap{
+		// ---- existing functions ----
+		"rawHTML": func(s string) template.HTML {
+			return template.HTML(s)
+		},
+		"safeJS": func(s string) template.JS {
+			return template.JS(s)
+		},
+		"formatDate": func(t time.Time) string {
+			if t.IsZero() {
+				return ""
+			}
+			return t.Format("Jan 2, 2006")
+		},
+		"urlize": func(s string) string {
+			return urlize(s)
+		},
+		"trimSlash": func(s string) string {
+			return strings.TrimRight(s, "/")
+		},
+		"tagFontSize": func(count int) float64 {
+			base := 0.8
+			scale := math.Log1p(float64(count)) * 0.3
+			size := base + scale
+			if size > 2.0 {
+				size = 2.0
+			}
+			return math.Round(size*10) / 10
+		},
+		"safeURL": func(s string) template.URL {
+			return template.URL(s)
+		},
+		"add": func(a, b int) int { return a + b },
+		"sub": func(a, b int) int { return a - b },
+		"mul": func(a, b int) int { return a * b },
+		"dict": func(pairs ...any) map[string]any {
+			m := make(map[string]any)
+			for i := 0; i+1 < len(pairs); i += 2 {
+				if key, ok := pairs[i].(string); ok {
+					m[key] = pairs[i+1]
+				}
+			}
+			return m
+		},
+		"hasPrefix": strings.HasPrefix,
+		"hasSuffix": strings.HasSuffix,
+
+		// ---- new Hugo-compatible functions ----
+
+		// Page/collection filters
+		"where": wherePages,
+		"first": func(n int, pages []*content.Page) []*content.Page {
+			if n >= len(pages) {
+				return pages
+			}
+			return pages[:n]
+		},
+		"last": func(n int, pages []*content.Page) []*content.Page {
+			if n >= len(pages) {
+				return pages
+			}
+			return pages[len(pages)-n:]
+		},
+		"after": func(n int, pages []*content.Page) []*content.Page {
+			if n >= len(pages) {
+				return nil
+			}
+			return pages[n:]
+		},
+		"sort": sortPages,
+
+		// String functions
+		"safeHTML": func(s string) template.HTML { return template.HTML(s) },
+		"safeCSS":  func(s string) template.CSS { return template.CSS(s) },
+		"markdownify": func(s string) template.HTML {
+			return markdownifyString(s)
+		},
+		"humanize":   humanize,
+		"title":      titleCase,
+		"lower":      strings.ToLower,
+		"upper":      strings.ToUpper,
+		"trim":       strings.Trim,
+		"trimLeft":   strings.TrimLeft,
+		"trimRight":  strings.TrimRight,
+		"trimPrefix": strings.TrimPrefix,
+		"trimSuffix": strings.TrimSuffix,
+		"replace": func(s, old, newStr string) string {
+			return strings.ReplaceAll(s, old, newStr)
+		},
+		"replaceRE": func(pattern, repl, s string) string {
+			re, err := regexp.Compile(pattern)
+			if err != nil {
+				return s
+			}
+			return re.ReplaceAllString(s, repl)
+		},
+		"split": func(s, sep string) []string {
+			return strings.Split(s, sep)
+		},
+		"join": func(sep string, ss []string) string {
+			return strings.Join(ss, sep)
+		},
+		"truncate": truncateWords,
+		"plainify": plainify,
+
+		// strings.* namespace (dot-notation names)
+		"strings.Contains":   strings.Contains,
+		"strings.HasPrefix":  strings.HasPrefix,
+		"strings.HasSuffix":  strings.HasSuffix,
+		"strings.TrimPrefix": strings.TrimPrefix,
+		"strings.TrimSuffix": strings.TrimSuffix,
+
+		// printf alias
+		"printf": fmt.Sprintf,
+
+		// URL functions
+		"absURL": func(path string) string {
+			base := strings.TrimRight(r.site.BaseURL, "/")
+			if strings.HasPrefix(path, "/") {
+				return base + path
+			}
+			return base + "/" + path
+		},
+		"relURL": func(path string) string {
+			if strings.HasPrefix(path, "/") {
+				return path
+			}
+			return "/" + path
+		},
+
+		// Date/time
+		"dateFormat": func(layout string, t time.Time) string {
+			if goLayout, ok := dateFormatLayouts[layout]; ok {
+				return t.Format(goLayout)
+			}
+			return t.Format(layout)
+		},
+		"now": time.Now,
+
+		// Math
+		"div": func(a, b int) int {
+			if b == 0 {
+				return 0
+			}
+			return a / b
+		},
+		"mod": func(a, b int) int {
+			if b == 0 {
+				return 0
+			}
+			return a % b
+		},
+		"modBool": func(a, b int) bool {
+			if b == 0 {
+				return false
+			}
+			return a%b == 0
+		},
+		"math.Add":   func(a, b int) int { return a + b },
+		"math.Sub":   func(a, b int) int { return a - b },
+		"math.Mul":   func(a, b int) int { return a * b },
+		"math.Div":   func(a, b int) int { if b == 0 { return 0 }; return a / b },
+		"math.Mod":   func(a, b int) int { if b == 0 { return 0 }; return a % b },
+		"math.Abs":   func(x float64) float64 { return math.Abs(x) },
+		"math.Ceil":  func(x float64) float64 { return math.Ceil(x) },
+		"math.Floor": func(x float64) float64 { return math.Floor(x) },
+		"math.Round": func(x float64) float64 { return math.Round(x) },
+		"math.Log":   func(x float64) float64 { return math.Log(x) },
+		"math.Sqrt":  func(x float64) float64 { return math.Sqrt(x) },
+
+		// Collections
+		"default": func(dflt, val any) any {
+			if isZero(val) {
+				return dflt
+			}
+			return val
+		},
+		"in":        inCollection,
+		"intersect": func(a, b []string) []string {
+			set := make(map[string]bool, len(b))
+			for _, s := range b {
+				set[s] = true
+			}
+			var result []string
+			for _, s := range a {
+				if set[s] {
+					result = append(result, s)
+				}
+			}
+			return result
+		},
+		"union": func(a, b []string) []string {
+			seen := make(map[string]bool)
+			var result []string
+			for _, s := range a {
+				if !seen[s] {
+					seen[s] = true
+					result = append(result, s)
+				}
+			}
+			for _, s := range b {
+				if !seen[s] {
+					seen[s] = true
+					result = append(result, s)
+				}
+			}
+			return result
+		},
+		"uniq": func(ss []string) []string {
+			seen := make(map[string]bool)
+			var result []string
+			for _, s := range ss {
+				if !seen[s] {
+					seen[s] = true
+					result = append(result, s)
+				}
+			}
+			return result
+		},
+		"append": func(ss []string, items ...string) []string {
+			return append(ss, items...)
+		},
+		"slice": func(items ...any) []any {
+			return items
+		},
+		"index": indexInto,
+		"isset": func(m map[string]any, key string) bool {
+			if m == nil {
+				return false
+			}
+			_, ok := m[key]
+			return ok
+		},
+		"seq": func(n int) []int {
+			result := make([]int, n)
+			for i := range result {
+				result[i] = i + 1
+			}
+			return result
+		},
+		"cond": func(condition bool, a, b any) any {
+			if condition {
+				return a
+			}
+			return b
+		},
+
+		// Encoding
+		"jsonify": func(v any) string {
+			b, err := json.Marshal(v)
+			if err != nil {
+				return ""
+			}
+			return string(b)
+		},
+		"base64Encode": func(s string) string {
+			return base64.StdEncoding.EncodeToString([]byte(s))
+		},
+		"base64Decode": func(s string) string {
+			b, err := base64.StdEncoding.DecodeString(s)
+			if err != nil {
+				return ""
+			}
+			return string(b)
+		},
+
+		// Type conversion
+		"string": func(v any) string {
+			return fmt.Sprintf("%v", v)
+		},
+		"int": func(v any) int {
+			if n, ok := toInt(v); ok {
+				return n
+			}
+			return 0
+		},
+		"float": func(v any) float64 {
+			switch n := v.(type) {
+			case float64:
+				return n
+			case float32:
+				return float64(n)
+			case int:
+				return float64(n)
+			case int64:
+				return float64(n)
+			}
+			return 0
+		},
+	}
+
+	// partial: load and render a partial template
+	fm["partial"] = func(name string, ctx any) (template.HTML, error) {
+		return r.renderPartial(name, ctx)
+	}
+
+	return fm
+}
+
+// renderPartial renders a named partial template with the given context.
+func (r *Renderer) renderPartial(name string, ctx any) (template.HTML, error) {
+	if !strings.HasSuffix(name, ".html") {
+		name = name + ".html"
+	}
+
+	r.tmplMu.Lock()
+	t, ok := r.partialCache[name]
+	r.tmplMu.Unlock()
+
+	if !ok {
+		var partialContent string
+		if r.layoutsDir != "" {
+			partialPath := filepath.Join(r.layoutsDir, "partials", name)
+			if data, err := os.ReadFile(partialPath); err == nil {
+				partialContent = string(data)
+			}
+		}
+		if partialContent == "" {
+			return "", fmt.Errorf("partial %q not found", name)
+		}
+
+		parsed, err := template.New(name).Funcs(r.funcMap).Parse(partialContent)
+		if err != nil {
+			return "", fmt.Errorf("parse partial %q: %w", name, err)
+		}
+
+		r.tmplMu.Lock()
+		r.partialCache[name] = parsed
+		r.tmplMu.Unlock()
+		t = parsed
+	}
+
+	var buf bytes.Buffer
+	if err := t.Execute(&buf, ctx); err != nil {
+		return "", fmt.Errorf("execute partial %q: %w", name, err)
+	}
+	return template.HTML(buf.String()), nil
+}
+
+// hugoLookupOrder returns the ordered list of template paths to check for a given page.
+// Each entry is a path relative to layoutsDir.
+func hugoLookupOrder(kind, pageType, layout, section, lang string) []string {
+	var candidates []string
+
+	// Helper to add both lang-suffixed and plain variants.
+	add := func(base string) {
+		if lang != "" && lang != "en" {
+			ext := filepath.Ext(base)
+			without := strings.TrimSuffix(base, ext)
+			candidates = append(candidates, without+"."+lang+ext)
+		}
+		candidates = append(candidates, base)
+	}
+
+	switch kind {
+	case "page":
+		typ := pageType
+		if typ == "" {
+			typ = section
+		}
+		if typ != "" {
+			if layout != "" {
+				add(typ + "/" + layout + ".html")
+			}
+			add(typ + "/single.html")
+		}
+		if layout != "" {
+			add("_default/" + layout + ".html")
+		}
+		add("_default/single.html")
+
+	case "section":
+		sec := section
+		if sec == "" {
+			sec = pageType
+		}
+		if sec != "" {
+			if layout != "" {
+				add(sec + "/" + layout + ".html")
+			}
+			add(sec + "/list.html")
+		}
+		if layout != "" {
+			add("_default/" + layout + ".html")
+		}
+		add("_default/list.html")
+
+	case "home":
+		add("index.html")
+		add("home.html")
+		add("_default/home.html")
+		add("_default/list.html")
+
+	case "taxonomy":
+		plural := section
+		if plural == "" {
+			plural = pageType
+		}
+		if plural != "" {
+			add(plural + "/taxonomy.html")
+			add(plural + "/list.html")
+		}
+		add("_default/taxonomy.html")
+		add("_default/list.html")
+
+	case "term":
+		plural := section
+		if plural == "" {
+			plural = pageType
+		}
+		if plural != "" {
+			add(plural + "/term.html")
+			add(plural + "/list.html")
+		}
+		add("_default/term.html")
+		add("_default/list.html")
+
+	case "404":
+		add("404.html")
+		add("_default/404.html")
+
+	default:
+		// Special/other kinds: try kind.html in _default then at root
+		if kind != "" {
+			add(kind + ".html")
+			add("_default/" + kind + ".html")
+		}
+	}
+
+	return candidates
+}
+
+// hugoBaseofOrder returns the ordered list of baseof template paths to check.
+func hugoBaseofOrder(pageType, section string) []string {
+	var candidates []string
+	typ := pageType
+	if typ == "" {
+		typ = section
+	}
+	if typ != "" {
+		candidates = append(candidates, typ+"/baseof.html")
+	}
+	candidates = append(candidates, "_default/baseof.html")
+	return candidates
+}
+
+// templateCacheKey builds a unique cache key for a template lookup.
+func templateCacheKey(kind, pageType, layout, section, lang string) string {
+	return kind + "|" + pageType + "|" + layout + "|" + section + "|" + lang
+}
+
+// getTemplate returns a compiled template for the given page parameters.
+// It implements Hugo's template lookup order and baseof composition.
 // Safe for concurrent use.
 func (r *Renderer) getTemplate(kind string) (*template.Template, error) {
+	return r.getTemplateFor(kind, "", "", "", "")
+}
+
+// getTemplateFor returns a compiled template using full Hugo lookup order.
+func (r *Renderer) getTemplateFor(kind, pageType, layout, section, lang string) (*template.Template, error) {
+	cacheKey := templateCacheKey(kind, pageType, layout, section, lang)
+
 	r.tmplMu.Lock()
 	defer r.tmplMu.Unlock()
 
-	if t, ok := r.tmplCache[kind]; ok {
+	if t, ok := r.tmplCache[cacheKey]; ok {
 		return t, nil
 	}
 
@@ -226,37 +878,75 @@ func (r *Renderer) getTemplate(kind string) (*template.Template, error) {
 		liveReloadBlock = defaultTemplates["live-reload-js"]
 	}
 
-	// Build the template from baseof + specific kind
-	baseof := defaultTemplates["baseof"]
-	_ = defaultTemplates["sidebar"] // no longer used directly
 	breadcrumb := defaultTemplates["breadcrumb"]
-	kindTmpl, ok := defaultTemplates[kind]
-	if !ok {
-		return nil, fmt.Errorf("no template for kind %q", kind)
+
+	// Determine the kind template content.
+	kindTmpl := ""
+	kindSource := "" // for error messages
+
+	// First: try Hugo lookup order in layoutsDir.
+	if r.layoutsDir != "" {
+		candidates := hugoLookupOrder(kind, pageType, layout, section, lang)
+		for _, candidate := range candidates {
+			path := filepath.Join(r.layoutsDir, candidate)
+			if data, err := os.ReadFile(path); err == nil {
+				kindTmpl = string(data)
+				kindSource = candidate
+				break
+			}
+		}
 	}
 
-	// Try loading from layoutsDir
-	if r.layoutsDir != "" {
+	// Also try legacy flat lookup for built-in types (backward compat):
+	// e.g. layouts/page.html, layouts/home.html etc.
+	if kindTmpl == "" && r.layoutsDir != "" {
 		if data, err := os.ReadFile(filepath.Join(r.layoutsDir, kind+".html")); err == nil {
 			kindTmpl = string(data)
-		}
-		if data, err := os.ReadFile(filepath.Join(r.layoutsDir, "baseof.html")); err == nil {
-			baseof = string(data)
+			kindSource = kind + ".html"
 		}
 	}
 
-	// Compose: baseof calls {{template "page-main" .}}, {{template "page-sidebar" .}},
-	// and {{template "page-live-reload" .}} which are defined in kindTmpl.
+	// Fall back to embedded default.
+	if kindTmpl == "" {
+		var ok bool
+		kindTmpl, ok = defaultTemplates[kind]
+		if !ok {
+			return nil, fmt.Errorf("no template for kind %q", kind)
+		}
+		kindSource = "embedded:" + kind
+	}
+	_ = kindSource // used only for debugging
+
+	// Determine the baseof template content.
+	baseof := defaultTemplates["baseof"]
+	if r.layoutsDir != "" {
+		baseofCandidates := hugoBaseofOrder(pageType, section)
+		for _, candidate := range baseofCandidates {
+			path := filepath.Join(r.layoutsDir, candidate)
+			if data, err := os.ReadFile(path); err == nil {
+				baseof = string(data)
+				break
+			}
+		}
+		// Also try flat layouts/baseof.html (legacy).
+		if baseof == defaultTemplates["baseof"] {
+			if data, err := os.ReadFile(filepath.Join(r.layoutsDir, "baseof.html")); err == nil {
+				baseof = string(data)
+			}
+		}
+	}
+
+	// Compose: baseof + breadcrumb + kindTmpl + liveReloadBlock
 	combined := baseof + "\n" +
 		breadcrumb + "\n" +
 		kindTmpl + "\n" +
 		liveReloadBlock
 
-	t, err := template.New("baseof").Funcs(funcMap).Parse(combined)
+	t, err := template.New("baseof").Funcs(r.funcMap).Parse(combined)
 	if err != nil {
 		return nil, fmt.Errorf("parse template %q: %w", kind, err)
 	}
-	r.tmplCache[kind] = t
+	r.tmplCache[cacheKey] = t
 	return t, nil
 }
 
@@ -339,7 +1029,7 @@ func (r *Renderer) RenderPage(page *content.Page, allPages []*content.Page) erro
 		}
 	}
 
-	return r.renderToFile(templateName, page.OutputPath, data)
+	return r.renderToFileFor(templateName, page.OutputPath, data, page.Type, page.Layout, page.Section, page.Lang)
 }
 
 // Render404 renders a 404.html page to outputDir/404.html.
@@ -370,6 +1060,7 @@ func (r *Renderer) RenderTagPage(tag string, pages []*content.Page, outputDir st
 		LinkTitle:    tag,
 		RelPermalink: permalink,
 		Kind:         "term",
+		Section:      "tags",
 	}
 
 	data := &TemplateData{
@@ -389,6 +1080,7 @@ func (r *Renderer) RenderTaxonomyPage(tags []TagCount, outputDir string) error {
 		LinkTitle:    "Tags",
 		RelPermalink: "/tags/",
 		Kind:         "taxonomy",
+		Section:      "tags",
 	}
 
 	data := &TemplateData{
@@ -422,7 +1114,11 @@ func (r *Renderer) RenderSearchPage(outputDir string) error {
 }
 
 func (r *Renderer) renderToFile(kind, outputPath string, data *TemplateData) error {
-	t, err := r.getTemplate(kind)
+	return r.renderToFileFor(kind, outputPath, data, "", "", "", "")
+}
+
+func (r *Renderer) renderToFileFor(kind, outputPath string, data *TemplateData, pageType, layout, section, lang string) error {
+	t, err := r.getTemplateFor(kind, pageType, layout, section, lang)
 	if err != nil {
 		return err
 	}
@@ -464,6 +1160,7 @@ func (r *Renderer) InvalidateCache() {
 	r.tmplMu.Lock()
 	defer r.tmplMu.Unlock()
 	r.tmplCache = make(map[string]*template.Template)
+	r.partialCache = make(map[string]*template.Template)
 }
 
 func urlize(s string) string {

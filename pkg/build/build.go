@@ -321,12 +321,22 @@ func Build(cfg *Config) (*Stats, error) {
 		}
 	}
 
+	// Build RegularPages (kind=page only) for .Site.RegularPages in templates.
+	var regularPages []*content.Page
+	for _, p := range pageSlice {
+		if p.Kind == "page" {
+			regularPages = append(regularPages, p)
+		}
+	}
+
 	site := &render.SiteData{
-		Title:       cfg.SiteTitle,
-		BaseURL:     cfg.BaseURL,
-		Description: cfg.SiteDesc,
-		EditURLBase: cfg.EditURLBase,
-		Params:      cfg.Params,
+		Title:        cfg.SiteTitle,
+		BaseURL:      cfg.BaseURL,
+		Description:  cfg.SiteDesc,
+		EditURLBase:  cfg.EditURLBase,
+		Params:       cfg.Params,
+		Pages:        pageSlice,
+		RegularPages: regularPages,
 	}
 
 	rAssets := render.AssetRefs{
