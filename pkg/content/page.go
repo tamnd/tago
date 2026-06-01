@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	highlighting "github.com/yuin/goldmark-highlighting/v2"
@@ -229,11 +230,14 @@ func (mdLinkRewriterExt) Extend(m goldmark.Markdown) {
 	)
 }
 
-// mdRenderer is a shared goldmark instance.
-var mdRenderer goldmark.Markdown
+// mdRendererPool pools goldmark.Markdown instances so concurrent ParseAndRender
+// calls each get their own instance (goldmark is not safe for concurrent use).
+var mdRendererPool = sync.Pool{
+	New: func() any { return newMDRenderer() },
+}
 
-func init() {
-	mdRenderer = goldmark.New(
+func newMDRenderer() goldmark.Markdown {
+	return goldmark.New(
 		goldmark.WithExtensions(
 			extension.GFM,
 			meta.Meta,
@@ -271,10 +275,13 @@ func ParseAndRender(filePath string) (*Page, error) {
 	// Pre-process: tag bare code fences with detected language before goldmark parses.
 	rendered := tagCodeFences(data)
 
-	// Render markdown → HTML
+	// Render markdown → HTML using a pooled goldmark instance (not concurrency-safe).
+	md := mdRendererPool.Get().(goldmark.Markdown)
 	var buf bytes.Buffer
 	ctx := parser.NewContext()
-	if err := mdRenderer.Convert(rendered, &buf, parser.WithContext(ctx)); err != nil {
+	err = md.Convert(rendered, &buf, parser.WithContext(ctx))
+	mdRendererPool.Put(md)
+	if err != nil {
 		return nil, fmt.Errorf("render %s: %w", filePath, err)
 	}
 	contentHTML := buf.String()

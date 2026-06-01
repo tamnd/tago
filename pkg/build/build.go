@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tamnd/tago/pkg/asset"
@@ -123,27 +124,51 @@ func Build(cfg *Config) (*Stats, error) {
 	log.Printf("tago: %d total files, %d changed, %d deleted",
 		len(diskHashes), len(changedFiles), len(deletedFiles))
 
-	// Step 4: Parse and render changed pages
-	changedPages := make(map[string]*content.Page)
-	for _, filePath := range changedFiles {
-		page, err := content.ParseAndRender(filePath)
-		if err != nil {
-			log.Printf("tago: error parsing %s: %v", filePath, err)
-			continue
+	// Step 4: Parse changed pages in parallel using a worker pool.
+	changedPages := make(map[string]*content.Page, len(changedFiles))
+	if len(changedFiles) > 0 {
+		type parseResult struct {
+			filePath string
+			page     *content.Page
+			err      error
 		}
-		permalink, lang := content.PermalinkFromPath(cfg.ContentDir, filePath, cfg.DefaultLang)
-		page.RelPermalink = permalink
-		page.Lang = lang
-		page.OutputPath = content.OutputPathFromPermalink(cfg.OutputDir, permalink)
-		page.Kind = content.KindFromPath(cfg.ContentDir, filePath)
-		page.Section = content.SectionFromPath(cfg.ContentDir, filePath)
-		page.Depth = content.DepthFromPath(cfg.ContentDir, filePath)
-		// Capture stat fields so the next build can skip hashing this file.
-		if info, serr := os.Stat(filePath); serr == nil {
-			page.FileSize = info.Size()
-			page.FileMtime = info.ModTime().UnixNano()
+		parseJobs := make(chan string, len(changedFiles))
+		parseResults := make(chan parseResult, len(changedFiles))
+		var parseWg sync.WaitGroup
+		for range runtime.NumCPU() {
+			parseWg.Add(1)
+			go func() {
+				defer parseWg.Done()
+				for fp := range parseJobs {
+					p, perr := content.ParseAndRender(fp)
+					parseResults <- parseResult{fp, p, perr}
+				}
+			}()
 		}
-		changedPages[filePath] = page
+		for _, fp := range changedFiles {
+			parseJobs <- fp
+		}
+		close(parseJobs)
+		go func() { parseWg.Wait(); close(parseResults) }()
+
+		for r := range parseResults {
+			if r.err != nil {
+				log.Printf("tago: error parsing %s: %v", r.filePath, r.err)
+				continue
+			}
+			permalink, lang := content.PermalinkFromPath(cfg.ContentDir, r.filePath, cfg.DefaultLang)
+			r.page.RelPermalink = permalink
+			r.page.Lang = lang
+			r.page.OutputPath = content.OutputPathFromPermalink(cfg.OutputDir, permalink)
+			r.page.Kind = content.KindFromPath(cfg.ContentDir, r.filePath)
+			r.page.Section = content.SectionFromPath(cfg.ContentDir, r.filePath)
+			r.page.Depth = content.DepthFromPath(cfg.ContentDir, r.filePath)
+			if info, serr := os.Stat(r.filePath); serr == nil {
+				r.page.FileSize = info.Size()
+				r.page.FileMtime = info.ModTime().UnixNano()
+			}
+			changedPages[r.filePath] = r.page
+		}
 	}
 
 	// Step 5: Load metadata for unchanged pages from cache
@@ -291,34 +316,71 @@ func Build(cfg *Config) (*Stats, error) {
 
 	renderer := render.New(site, rAssets, cfg.LayoutsDir, cfg.LiveReload)
 
-	pagesRebuilt := 0
-	var toSave []*cache.PageRecord
-
-	// Render pages that need updating
+	// Collect pages that need rendering.
+	var renderQueue []*content.Page
 	for _, page := range pageSlice {
-		shouldRender := needsRender[page.FilePath] || (page.FilePath == "" /* special pages */)
-		if !shouldRender {
-			continue
-		}
-		// ContentHTML is no longer cached in the DB; re-parse from disk for any
-		// page that needs rendering but wasn't in changedPages (e.g. ancestors
-		// re-rendered due to a child change, or layout-change forced re-renders).
-		if page.ContentHTML == "" && page.FilePath != "" {
-			if reparsed, rerr := content.ParseAndRender(page.FilePath); rerr == nil {
-				page.ContentHTML = reparsed.ContentHTML
-				page.ContentPlain = reparsed.ContentPlain
-			}
-		}
-		if err := renderer.RenderPage(page, pageSlice); err != nil {
-			log.Printf("tago: render error for %s: %v", page.RelPermalink, err)
-			continue
-		}
-		pagesRebuilt++
-
-		if page.FilePath != "" {
-			toSave = append(toSave, pageToRecord(page))
+		if needsRender[page.FilePath] || page.FilePath == "" {
+			renderQueue = append(renderQueue, page)
 		}
 	}
+
+	// Pre-create all output directories once before parallel rendering.
+	// This eliminates redundant os.MkdirAll calls (and their stat+mkdir syscalls)
+	// from the hot render path — each directory is created at most once here.
+	seenDirs := make(map[string]bool, len(renderQueue))
+	for _, page := range renderQueue {
+		if page.OutputPath != "" {
+			dir := filepath.Dir(page.OutputPath)
+			if !seenDirs[dir] {
+				seenDirs[dir] = true
+				_ = os.MkdirAll(dir, 0755)
+			}
+		}
+	}
+
+	// Render pages in parallel. Each goroutine:
+	//   1. Re-parses from disk if ContentHTML is missing (cached pages re-rendered
+	//      due to layout change or ancestor propagation).
+	//   2. Calls RenderPage (safe: clones template, writes to unique output path).
+	var (
+		pagesRebuiltAtomic atomic.Int64
+		toSaveMu           sync.Mutex
+		toSave             []*cache.PageRecord
+	)
+	renderJobs := make(chan *content.Page, len(renderQueue))
+	for _, p := range renderQueue {
+		renderJobs <- p
+	}
+	close(renderJobs)
+
+	var renderWg sync.WaitGroup
+	for range runtime.NumCPU() {
+		renderWg.Add(1)
+		go func() {
+			defer renderWg.Done()
+			for page := range renderJobs {
+				if page.ContentHTML == "" && page.FilePath != "" {
+					if reparsed, rerr := content.ParseAndRender(page.FilePath); rerr == nil {
+						page.ContentHTML = reparsed.ContentHTML
+						page.ContentPlain = reparsed.ContentPlain
+					}
+				}
+				if err := renderer.RenderPage(page, pageSlice); err != nil {
+					log.Printf("tago: render error for %s: %v", page.RelPermalink, err)
+					continue
+				}
+				pagesRebuiltAtomic.Add(1)
+				if page.FilePath != "" {
+					rec := pageToRecord(page)
+					toSaveMu.Lock()
+					toSave = append(toSave, rec)
+					toSaveMu.Unlock()
+				}
+			}
+		}()
+	}
+	renderWg.Wait()
+	pagesRebuilt := int(pagesRebuiltAtomic.Load())
 
 	// Flush all cache updates in a single transaction.
 	if err := cacheDB.SaveBatch(toSave); err != nil {
