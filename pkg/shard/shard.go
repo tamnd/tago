@@ -4,6 +4,7 @@
 package shard
 
 import (
+	"bytes"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -190,17 +191,14 @@ func ParseConfig(data []byte) (*Config, error) {
 // URL mapping
 // -------------------------------------------------------------------------
 
-var (
-	// Matches href/src/action/content/poster attributes with absolute paths.
-	attrRe = regexp.MustCompile(
-		`(?i)((?:href|src|action|content|poster)=["'])(/[^"'<>{}\s]*)`,
-	)
-	// CSS url() in three quoting styles.
-	cssDoubleRe = regexp.MustCompile(`url\("(/[^"]+)"\)`)
-	cssSingleRe = regexp.MustCompile(`url\('(/[^']+)'\)`)
-	cssBareRe   = regexp.MustCompile(`url\((/[^)'"\s]+)\)`)
-	// Canonical link element (tago always outputs double-quoted href= in this order).
-	canonicalRe = regexp.MustCompile(`(<link rel="canonical" href=")([^"]+)(")`)
+// combinedRe matches all URL patterns in a single scan.
+// Groups: [1,2,3]=canonical  [4,5]=attr  [6]=css-double  [7]=css-single  [8]=css-bare
+var combinedRe = regexp.MustCompile(
+	`(<link rel="canonical" href=")([^"]+)(")` +
+		`|((?:href|src|action|content|poster)=["'])(/[^"'<>{}\s]*)` +
+		`|url\("(/[^"]+)"\)` +
+		`|url\('(/[^']+)'\)` +
+		`|url\((/[^)'"\s]+)\)`,
 )
 
 func isLocalShared(url string) bool {
@@ -290,77 +288,101 @@ func mapURL(url string, current, main *Site, shards []*Site) string {
 	return main.BaseURL() + url
 }
 
-// rewriteText applies all URL rewrites to an HTML/CSS/JS/… file body.
+// rewriteText applies all URL rewrites to an HTML/CSS/JS/… file body in a
+// single regex scan (combinedRe) instead of five separate passes.
 func rewriteText(text string, current, main *Site, shards []*Site) string {
 	mapFn := func(u string) string { return mapURL(u, current, main, shards) }
 
-	// 1. Canonical URL — fix full absolute canonical for shard pages.
-	text = canonicalRe.ReplaceAllStringFunc(text, func(m string) string {
-		subs := canonicalRe.FindStringSubmatch(m)
-		if len(subs) != 4 {
+	return combinedRe.ReplaceAllStringFunc(text, func(m string) string {
+		subs := combinedRe.FindStringSubmatch(m)
+		if len(subs) < 9 {
 			return m
 		}
-		prefix, oldURL, quote := subs[1], subs[2], subs[3]
-		var urlPath string
-		for _, base := range []string{main.BaseURL(), "https://brain.tamnd.com"} {
-			if strings.HasPrefix(oldURL, base) {
-				urlPath = oldURL[len(base):]
-				if urlPath == "" {
-					urlPath = "/"
+		switch {
+		case subs[1] != "": // canonical: prefix=subs[1] url=subs[2] quote=subs[3]
+			prefix, oldURL, quote := subs[1], subs[2], subs[3]
+			var urlPath string
+			for _, base := range []string{main.BaseURL(), "https://brain.tamnd.com"} {
+				if strings.HasPrefix(oldURL, base) {
+					urlPath = oldURL[len(base):]
+					if urlPath == "" {
+						urlPath = "/"
+					}
+					break
 				}
-				break
 			}
-		}
-		if urlPath == "" {
-			return m
-		}
-		mapped := mapFn(urlPath)
-		if strings.HasPrefix(mapped, "/") {
-			mapped = current.BaseURL() + mapped
-		}
-		return prefix + mapped + quote
-	})
-
-	// 2. href/src/action/content/poster attributes.
-	text = attrRe.ReplaceAllStringFunc(text, func(m string) string {
-		subs := attrRe.FindStringSubmatch(m)
-		if len(subs) != 3 {
-			return m
-		}
-		attrPrefix, url := subs[1], subs[2]
-		mapped := mapFn(url)
-		if mapped == url {
-			return m
-		}
-		return attrPrefix + mapped
-	})
-
-	// 3. CSS url() in all quoting styles.
-	rewriteCSS := func(re *regexp.Regexp, wrap func(string) string) {
-		text = re.ReplaceAllStringFunc(text, func(m string) string {
-			subs := re.FindStringSubmatch(m)
-			if len(subs) < 2 {
+			if urlPath == "" {
 				return m
 			}
-			url := subs[len(subs)-1]
+			mapped := mapFn(urlPath)
+			if strings.HasPrefix(mapped, "/") {
+				mapped = current.BaseURL() + mapped
+			}
+			return prefix + mapped + quote
+
+		case subs[4] != "": // attr: attrPrefix=subs[4] url=subs[5]
+			attrPrefix, url := subs[4], subs[5]
 			mapped := mapFn(url)
 			if mapped == url {
 				return m
 			}
-			return wrap(mapped)
-		})
-	}
-	rewriteCSS(cssDoubleRe, func(u string) string { return `url("` + u + `")` })
-	rewriteCSS(cssSingleRe, func(u string) string { return "url('" + u + "')" })
-	rewriteCSS(cssBareRe, func(u string) string { return "url(" + u + ")" })
+			return attrPrefix + mapped
 
-	return text
+		case subs[6] != "": // css url("...")
+			mapped := mapFn(subs[6])
+			if mapped == subs[6] {
+				return m
+			}
+			return `url("` + mapped + `")`
+
+		case subs[7] != "": // css url('...')
+			mapped := mapFn(subs[7])
+			if mapped == subs[7] {
+				return m
+			}
+			return "url('" + mapped + "')"
+
+		case subs[8] != "": // css url(...)
+			mapped := mapFn(subs[8])
+			if mapped == subs[8] {
+				return m
+			}
+			return "url(" + mapped + ")"
+		}
+		return m
+	})
+}
+
+// rewriteNeeded is a fast byte-level pre-check before running any regex.
+// It returns false when the file obviously has nothing to rewrite.
+func rewriteNeeded(data []byte, current, main *Site, shards []*Site) bool {
+	// Any file containing a shard SourcePrefix needs rewriting.
+	for _, s := range shards {
+		if bytes.Contains(data, []byte(s.SourcePrefix)) {
+			return true
+		}
+	}
+	// On shard sites, files containing the main site's canonical domain need
+	// rewriting (canonical tag fix). On main, same check for shard domains.
+	if bytes.Contains(data, []byte(main.BaseURL())) {
+		return true
+	}
+	for _, s := range shards {
+		if bytes.Contains(data, []byte(s.BaseURL())) {
+			return true
+		}
+	}
+	return false
 }
 
 func rewriteFile(path string, current, main *Site, shards []*Site) (bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return false, err
+	}
+	// Fast pre-check: skip regex entirely if no known shard/domain markers present.
+	if !rewriteNeeded(data, current, main, shards) {
+		return false, nil
 	}
 	original := string(data)
 	rewritten := rewriteText(original, current, main, shards)
