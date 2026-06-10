@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/tamnd/tago/pkg/build"
@@ -461,6 +462,20 @@ func runClean(args []string) {
 	fmt.Printf("tago: removed %s\n", f.output)
 }
 
+func splitFlagValue(arg string, flag string, args []string, i *int) (string, bool) {
+	if arg == flag {
+		*i++
+		if *i < len(args) {
+			return args[*i], true
+		}
+		return "", false
+	}
+	if strings.HasPrefix(arg, flag+"=") {
+		return arg[len(flag)+1:], true
+	}
+	return "", false
+}
+
 func runSplit(args []string) {
 	opts := shard.Options{
 		ConfigFile:   "deploy-shards.toml",
@@ -469,33 +484,17 @@ func runSplit(args []string) {
 		SummaryFile:  "deploy-shards-summary.json",
 	}
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--config":
-			i++
-			if i < len(args) {
-				opts.ConfigFile = args[i]
-			}
-		case "--public":
-			i++
-			if i < len(args) {
-				opts.PublicDir = args[i]
-			}
-		case "--lastmods":
-			i++
-			if i < len(args) {
-				opts.LastmodsFile = args[i]
-			}
-		case "--summary":
-			i++
-			if i < len(args) {
-				opts.SummaryFile = args[i]
-			}
-		case "--since":
-			i++
-			if i < len(args) {
-				if ts, err := strconv.ParseInt(args[i], 10, 64); err == nil {
-					opts.Since = ts
-				}
+		if v, ok := splitFlagValue(args[i], "--config", args, &i); ok {
+			opts.ConfigFile = v
+		} else if v, ok := splitFlagValue(args[i], "--public", args, &i); ok {
+			opts.PublicDir = v
+		} else if v, ok := splitFlagValue(args[i], "--lastmods", args, &i); ok {
+			opts.LastmodsFile = v
+		} else if v, ok := splitFlagValue(args[i], "--summary", args, &i); ok {
+			opts.SummaryFile = v
+		} else if v, ok := splitFlagValue(args[i], "--since", args, &i); ok {
+			if ts, err := strconv.ParseInt(v, 10, 64); err == nil {
+				opts.Since = ts
 			}
 		}
 	}
