@@ -367,6 +367,8 @@ func rewriteFile(path string, current, main *Site, shards []*Site) (bool, error)
 	if rewritten == original {
 		return false, nil
 	}
+	// Remove before write to break any hard link created by copyFile.
+	_ = os.Remove(path)
 	return true, os.WriteFile(path, []byte(rewritten), 0644)
 }
 
@@ -427,9 +429,11 @@ func rewriteTree(root string, current, main *Site, shards []*Site) (int, error) 
 // File copying
 // -------------------------------------------------------------------------
 
+// copyFile hard-links src to dst; falls back to data copy on cross-device or
+// other link failures. Callers are responsible for pre-creating the directory.
 func copyFile(src, dst string) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		return err
+	if err := os.Link(src, dst); err == nil {
+		return nil
 	}
 	in, err := os.Open(src)
 	if err != nil {
@@ -1057,27 +1061,62 @@ func Split(opts Options) ([]SiteSummary, error) {
 		}
 	}
 
-	// 3. Copy: main (excluding shard dirs) + each shard + its shared assets.
+	// 3. Copy: main (excluding shard dirs) + each shard + shared assets, all in parallel.
 	excluded := make(map[string]bool)
 	for _, shard := range cfg.Shards {
 		if shard.SourcePrefix != "" {
 			excluded[strings.Trim(shard.SourcePrefix, "/")] = true
 		}
 	}
-	if err := copyTreeExcluding(opts.PublicDir, cfg.Main.Output, excluded); err != nil {
-		return nil, fmt.Errorf("copy main: %w", err)
-	}
+	// Validate shard sources before launching goroutines.
 	for _, shard := range cfg.Shards {
 		src := filepath.Join(opts.PublicDir, strings.Trim(shard.SourcePrefix, "/"))
 		if _, err := os.Stat(src); os.IsNotExist(err) {
 			return nil, fmt.Errorf("missing shard source: %s", src)
 		}
-		if err := copyDir(src, shard.Output); err != nil {
-			return nil, fmt.Errorf("copy shard %s: %w", shard.Name, err)
+	}
+	var (
+		copyWG  sync.WaitGroup
+		copyMu  sync.Mutex
+		copyErr error
+	)
+	copyWG.Add(1)
+	go func() {
+		defer copyWG.Done()
+		if err := copyTreeExcluding(opts.PublicDir, cfg.Main.Output, excluded); err != nil {
+			copyMu.Lock()
+			if copyErr == nil {
+				copyErr = fmt.Errorf("copy main: %w", err)
+			}
+			copyMu.Unlock()
 		}
-		if err := copyShared(opts.PublicDir, shard.Output); err != nil {
-			return nil, fmt.Errorf("copy shared to %s: %w", shard.Name, err)
-		}
+	}()
+	for _, shard := range cfg.Shards {
+		shard := shard
+		copyWG.Add(1)
+		go func() {
+			defer copyWG.Done()
+			src := filepath.Join(opts.PublicDir, strings.Trim(shard.SourcePrefix, "/"))
+			if err := copyDir(src, shard.Output); err != nil {
+				copyMu.Lock()
+				if copyErr == nil {
+					copyErr = fmt.Errorf("copy shard %s: %w", shard.Name, err)
+				}
+				copyMu.Unlock()
+				return
+			}
+			if err := copyShared(opts.PublicDir, shard.Output); err != nil {
+				copyMu.Lock()
+				if copyErr == nil {
+					copyErr = fmt.Errorf("copy shared to %s: %w", shard.Name, err)
+				}
+				copyMu.Unlock()
+			}
+		}()
+	}
+	copyWG.Wait()
+	if copyErr != nil {
+		return nil, copyErr
 	}
 
 	// 4. Clean oversized / leaked DB files.
