@@ -1018,6 +1018,11 @@ func validateSite(site *Site) (*SiteSummary, error) {
 // Main entry point
 // -------------------------------------------------------------------------
 
+func logPhase(label string, t time.Time) time.Time {
+	fmt.Fprintf(os.Stderr, "tago split [%s] %.1fs\n", label, time.Since(t).Seconds())
+	return time.Now()
+}
+
 // Split is the full pipeline: copy → clean → rewrite → search → redirects →
 // sitemaps → validate. It mirrors split_cloudflare_pages_shards.py but runs
 // the URL-rewrite step in parallel Go goroutines (typically 6–10× faster).
@@ -1053,6 +1058,7 @@ func Split(opts Options) ([]SiteSummary, error) {
 	}
 
 	allSites := append([]*Site{cfg.Main}, cfg.Shards...)
+	t := time.Now()
 
 	// 2. Remove stale outputs.
 	for _, s := range allSites {
@@ -1060,6 +1066,7 @@ func Split(opts Options) ([]SiteSummary, error) {
 			return nil, err
 		}
 	}
+	t = logPhase("remove", t)
 
 	// 3. Copy: main (excluding shard dirs) + each shard + shared assets, all in parallel.
 	excluded := make(map[string]bool)
@@ -1118,6 +1125,7 @@ func Split(opts Options) ([]SiteSummary, error) {
 	if copyErr != nil {
 		return nil, copyErr
 	}
+	t = logPhase("copy", t)
 
 	// 4. Clean oversized / leaked DB files.
 	for _, s := range allSites {
@@ -1134,7 +1142,9 @@ func Split(opts Options) ([]SiteSummary, error) {
 		rewriteWG.Add(1)
 		go func(site *Site) {
 			defer rewriteWG.Done()
-			_, err := rewriteTree(site.Output, site, cfg.Main, cfg.Shards)
+			st := time.Now()
+			n, err := rewriteTree(site.Output, site, cfg.Main, cfg.Shards)
+			fmt.Fprintf(os.Stderr, "tago split [rewrite:%s] %d changed, %.1fs\n", site.Name, n, time.Since(st).Seconds())
 			if err != nil {
 				rewriteMu.Lock()
 				if rewriteErr == nil {
@@ -1148,6 +1158,7 @@ func Split(opts Options) ([]SiteSummary, error) {
 	if rewriteErr != nil {
 		return nil, fmt.Errorf("rewrite: %w", rewriteErr)
 	}
+	t = logPhase("rewrite", t)
 
 	// 6. Split search data.
 	if err := splitSearchData(opts.PublicDir, cfg.Main.Output, cfg.Shards); err != nil {
@@ -1164,6 +1175,7 @@ func Split(opts Options) ([]SiteSummary, error) {
 	if err := generateSitemaps(cfg.Main, cfg.Shards, dates); err != nil {
 		return nil, fmt.Errorf("generate sitemaps: %w", err)
 	}
+	t = logPhase("sitemaps+search", t)
 
 	// 9. Validate and collect summary.
 	var summaries []SiteSummary
