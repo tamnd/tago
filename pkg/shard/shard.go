@@ -75,6 +75,7 @@ type Options struct {
 	ContentRoot  string // for lastmods path mapping    (default: content/en)
 	LastmodsFile string // incremental cache            (default: content-lastmods.json)
 	SummaryFile  string // JSON summary output          (default: deploy-shards-summary.json)
+	Since        int64  // Unix timestamp: only process public/ files modified at or after this time
 }
 
 // SiteSummary is one entry in the JSON summary written after a split.
@@ -1037,6 +1038,144 @@ func validateSite(site *Site) (*SiteSummary, error) {
 }
 
 // -------------------------------------------------------------------------
+// Incremental split helpers
+// -------------------------------------------------------------------------
+
+// isSharedRelPath reports whether relPath is a file shared to every shard output.
+func isSharedRelPath(relPath string) bool {
+	top := relPath
+	if idx := strings.IndexByte(relPath, filepath.Separator); idx >= 0 {
+		top = relPath[:idx]
+	}
+	for _, d := range sharedRootDirs {
+		if top == d {
+			return true
+		}
+	}
+	for _, f := range sharedRootFiles {
+		if relPath == f {
+			return true
+		}
+	}
+	return strings.HasPrefix(top, "_worker")
+}
+
+// copyOrRewriteTo copies srcPath to dstPath for the given site, rewriting URLs
+// in text files. dstPath's parent directory must already exist (or not), and
+// the function creates it as needed.
+func copyOrRewriteTo(srcPath, dstPath string, site, main *Site, shards []*Site) error {
+	if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
+		return err
+	}
+	if !textSuffixes[strings.ToLower(filepath.Ext(srcPath))] {
+		_ = os.Remove(dstPath)
+		if err := os.Link(srcPath, dstPath); err == nil {
+			return nil
+		}
+		return copyFile(srcPath, dstPath)
+	}
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		return err
+	}
+	rewritten := rewriteText(string(data), site, main, shards)
+	_ = os.Remove(dstPath)
+	return os.WriteFile(dstPath, []byte(rewritten), 0644)
+}
+
+// splitIncremental updates only public/ files with mtime >= since inside the
+// cached split output directories. All other outputs are left untouched.
+func splitIncremental(opts Options, cfg *Config, allSites []*Site, dates lastmodsMap) ([]SiteSummary, error) {
+	since := time.Unix(opts.Since, 0)
+	t := time.Now()
+
+	// Find all public/ files whose mtime >= since (i.e. written by the current Hugo build).
+	var changed []string
+	if err := filepath.WalkDir(opts.PublicDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if !info.ModTime().Before(since) {
+			rel, _ := filepath.Rel(opts.PublicDir, path)
+			changed = append(changed, rel)
+		}
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("walk public: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "tago split [incremental] %d changed files (since %s)\n",
+		len(changed), since.Format("15:04:05"))
+
+	for _, relPath := range changed {
+		srcPath := filepath.Join(opts.PublicDir, relPath)
+		urlPath := "/" + filepath.ToSlash(relPath)
+
+		if isSharedRelPath(relPath) {
+			// Shared asset: update in every output.
+			for _, site := range allSites {
+				dst := filepath.Join(site.Output, relPath)
+				if err := copyOrRewriteTo(srcPath, dst, site, cfg.Main, cfg.Shards); err != nil {
+					return nil, fmt.Errorf("update shared %s in %s: %w", relPath, site.Name, err)
+				}
+			}
+			continue
+		}
+
+		// Determine owning site.
+		var targetSite *Site
+		var dstRel string
+		for _, shard := range cfg.Shards {
+			if mapped, ok := shardPathFor(urlPath, shard); ok {
+				targetSite = shard
+				// Convert mapped URL path back to a file-system relative path.
+				dstRel = filepath.FromSlash(strings.TrimPrefix(mapped, "/"))
+				break
+			}
+		}
+		if targetSite == nil {
+			targetSite = cfg.Main
+			dstRel = relPath
+		}
+
+		dst := filepath.Join(targetSite.Output, dstRel)
+		if err := copyOrRewriteTo(srcPath, dst, targetSite, cfg.Main, cfg.Shards); err != nil {
+			return nil, fmt.Errorf("update %s: %w", relPath, err)
+		}
+	}
+	t = logPhase("incremental-update", t)
+
+	// Always regenerate search data, redirects, sitemaps (fast).
+	if err := splitSearchData(opts.PublicDir, cfg.Main.Output, cfg.Shards); err != nil {
+		return nil, fmt.Errorf("split search: %w", err)
+	}
+	if err := writeRedirects(cfg.Main, cfg.Shards); err != nil {
+		return nil, fmt.Errorf("write redirects: %w", err)
+	}
+	if err := generateSitemaps(cfg.Main, cfg.Shards, dates); err != nil {
+		return nil, fmt.Errorf("generate sitemaps: %w", err)
+	}
+	_ = t
+
+	var summaries []SiteSummary
+	for _, s := range allSites {
+		sum, err := validateSite(s)
+		if err != nil {
+			return nil, err
+		}
+		summaries = append(summaries, *sum)
+	}
+	if b, err := json.MarshalIndent(summaries, "", "  "); err == nil {
+		_ = os.WriteFile(opts.SummaryFile, b, 0644)
+	}
+	return summaries, nil
+}
+
+// -------------------------------------------------------------------------
 // Main entry point
 // -------------------------------------------------------------------------
 
@@ -1080,6 +1219,26 @@ func Split(opts Options) ([]SiteSummary, error) {
 	}
 
 	allSites := append([]*Site{cfg.Main}, cfg.Shards...)
+
+	// Load git lastmods (needed for both paths).
+	dates, _ := loadGitLastmods(opts.LastmodsFile, opts.ContentRoot)
+
+	// Incremental mode: if Since > 0 and all output dirs already exist (cached),
+	// only update files that Hugo wrote in this run.
+	if opts.Since > 0 {
+		allExist := true
+		for _, s := range allSites {
+			if _, err := os.Stat(s.Output); os.IsNotExist(err) {
+				allExist = false
+				break
+			}
+		}
+		if allExist {
+			return splitIncremental(opts, cfg, allSites, dates)
+		}
+		fmt.Fprintf(os.Stderr, "tago split [incremental] cache miss — doing full split\n")
+	}
+
 	t := time.Now()
 
 	// 2. Remove stale outputs.
@@ -1192,8 +1351,7 @@ func Split(opts Options) ([]SiteSummary, error) {
 		return nil, fmt.Errorf("write redirects: %w", err)
 	}
 
-	// 8. Sitemaps (git lastmods optional but included when available).
-	dates, _ := loadGitLastmods(opts.LastmodsFile, opts.ContentRoot)
+	// 8. Sitemaps.
 	if err := generateSitemaps(cfg.Main, cfg.Shards, dates); err != nil {
 		return nil, fmt.Errorf("generate sitemaps: %w", err)
 	}

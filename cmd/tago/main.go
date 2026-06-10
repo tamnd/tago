@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 
 	"github.com/tamnd/tago/pkg/build"
@@ -488,6 +489,13 @@ func runSplit(args []string) {
 			i++
 			if i < len(args) {
 				opts.SummaryFile = args[i]
+			}
+		case "--since":
+			i++
+			if i < len(args) {
+				if ts, err := strconv.ParseInt(args[i], 10, 64); err == nil {
+					opts.Since = ts
+				}
 			}
 		}
 	}
