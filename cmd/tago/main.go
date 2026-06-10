@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 
@@ -492,10 +491,10 @@ func runSplit(args []string) {
 			opts.LastmodsFile = v
 		} else if v, ok := splitFlagValue(args[i], "--summary", args, &i); ok {
 			opts.SummaryFile = v
-		} else if v, ok := splitFlagValue(args[i], "--since", args, &i); ok {
-			if ts, err := strconv.ParseInt(v, 10, 64); err == nil {
-				opts.Since = ts
-			}
+		} else if v, ok := splitFlagValue(args[i], "--manifest", args, &i); ok {
+			opts.ManifestFile = v
+		} else if args[i] == "--incremental" {
+			opts.Incremental = true
 		}
 	}
 

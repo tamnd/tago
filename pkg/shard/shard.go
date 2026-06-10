@@ -75,7 +75,8 @@ type Options struct {
 	ContentRoot  string // for lastmods path mapping    (default: content/en)
 	LastmodsFile string // incremental cache            (default: content-lastmods.json)
 	SummaryFile  string // JSON summary output          (default: deploy-shards-summary.json)
-	Since        int64  // Unix timestamp: only process public/ files modified at or after this time
+	Incremental  bool   // use manifest-based change detection; falls back to full split on miss
+	ManifestFile string // path to public/ size manifest (default: public-manifest.json)
 }
 
 // SiteSummary is one entry in the JSON summary written after a split.
@@ -1041,10 +1042,73 @@ func validateSite(site *Site) (*SiteSummary, error) {
 // Incremental split helpers
 // -------------------------------------------------------------------------
 
+// publicManifest maps public/-relative file paths to their byte sizes.
+type publicManifest map[string]int64
+
+func loadManifest(path string) publicManifest {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var m publicManifest
+	if json.Unmarshal(data, &m) != nil {
+		return nil
+	}
+	return m
+}
+
+func saveManifest(publicDir, path string) {
+	m := make(publicManifest)
+	_ = filepath.WalkDir(publicDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		info, _ := d.Info()
+		if info != nil {
+			rel, _ := filepath.Rel(publicDir, p)
+			m[filepath.ToSlash(rel)] = info.Size()
+		}
+		return nil
+	})
+	if b, err := json.Marshal(m); err == nil {
+		_ = os.WriteFile(path, b, 0644)
+	}
+}
+
+// findChangedByManifest returns public/-relative paths whose size differs from
+// the manifest, plus new files not present in the manifest, plus deleted paths
+// (size == -1 sentinel) that existed in the manifest but are gone from public/.
+func findChangedByManifest(publicDir string, manifest publicManifest) []string {
+	current := make(map[string]int64)
+	_ = filepath.WalkDir(publicDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		info, _ := d.Info()
+		if info != nil {
+			rel, _ := filepath.Rel(publicDir, p)
+			current[filepath.ToSlash(rel)] = info.Size()
+		}
+		return nil
+	})
+
+	var changed []string
+	for rel, size := range current {
+		if prev, ok := manifest[rel]; !ok || prev != size {
+			changed = append(changed, rel)
+		}
+	}
+	return changed
+}
+
 // isSharedRelPath reports whether relPath is a file shared to every shard output.
 func isSharedRelPath(relPath string) bool {
 	top := relPath
 	if idx := strings.IndexByte(relPath, filepath.Separator); idx >= 0 {
+		top = relPath[:idx]
+	}
+	// Forward-slash form (manifest keys use /)
+	if idx := strings.IndexByte(relPath, '/'); idx >= 0 {
 		top = relPath[:idx]
 	}
 	for _, d := range sharedRootDirs {
@@ -1061,8 +1125,7 @@ func isSharedRelPath(relPath string) bool {
 }
 
 // copyOrRewriteTo copies srcPath to dstPath for the given site, rewriting URLs
-// in text files. dstPath's parent directory must already exist (or not), and
-// the function creates it as needed.
+// in text files. Creates parent directories as needed.
 func copyOrRewriteTo(srcPath, dstPath string, site, main *Site, shards []*Site) error {
 	if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
 		return err
@@ -1083,42 +1146,20 @@ func copyOrRewriteTo(srcPath, dstPath string, site, main *Site, shards []*Site) 
 	return os.WriteFile(dstPath, []byte(rewritten), 0644)
 }
 
-// splitIncremental updates only public/ files with mtime >= since inside the
-// cached split output directories. All other outputs are left untouched.
-func splitIncremental(opts Options, cfg *Config, allSites []*Site, dates lastmodsMap) ([]SiteSummary, error) {
-	since := time.Unix(opts.Since, 0)
+// splitIncremental updates only the files that changed in public/ (detected via
+// size manifest) inside the cached split output directories.
+func splitIncremental(opts Options, cfg *Config, allSites []*Site, dates lastmodsMap, changed []string) ([]SiteSummary, error) {
 	t := time.Now()
 
-	// Find all public/ files whose mtime >= since (i.e. written by the current Hugo build).
-	var changed []string
-	if err := filepath.WalkDir(opts.PublicDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		if !info.ModTime().Before(since) {
-			rel, _ := filepath.Rel(opts.PublicDir, path)
-			changed = append(changed, rel)
-		}
-		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("walk public: %w", err)
-	}
-
-	fmt.Fprintf(os.Stderr, "tago split [incremental] %d changed files (since %s)\n",
-		len(changed), since.Format("15:04:05"))
+	fmt.Fprintf(os.Stderr, "tago split [incremental] %d changed files\n", len(changed))
 
 	for _, relPath := range changed {
-		srcPath := filepath.Join(opts.PublicDir, relPath)
-		urlPath := "/" + filepath.ToSlash(relPath)
+		srcPath := filepath.Join(opts.PublicDir, filepath.FromSlash(relPath))
+		urlPath := "/" + relPath // relPath already uses /
 
 		if isSharedRelPath(relPath) {
-			// Shared asset: update in every output.
 			for _, site := range allSites {
-				dst := filepath.Join(site.Output, relPath)
+				dst := filepath.Join(site.Output, filepath.FromSlash(relPath))
 				if err := copyOrRewriteTo(srcPath, dst, site, cfg.Main, cfg.Shards); err != nil {
 					return nil, fmt.Errorf("update shared %s in %s: %w", relPath, site.Name, err)
 				}
@@ -1126,20 +1167,18 @@ func splitIncremental(opts Options, cfg *Config, allSites []*Site, dates lastmod
 			continue
 		}
 
-		// Determine owning site.
 		var targetSite *Site
 		var dstRel string
 		for _, shard := range cfg.Shards {
 			if mapped, ok := shardPathFor(urlPath, shard); ok {
 				targetSite = shard
-				// Convert mapped URL path back to a file-system relative path.
 				dstRel = filepath.FromSlash(strings.TrimPrefix(mapped, "/"))
 				break
 			}
 		}
 		if targetSite == nil {
 			targetSite = cfg.Main
-			dstRel = relPath
+			dstRel = filepath.FromSlash(relPath)
 		}
 
 		dst := filepath.Join(targetSite.Output, dstRel)
@@ -1149,7 +1188,6 @@ func splitIncremental(opts Options, cfg *Config, allSites []*Site, dates lastmod
 	}
 	t = logPhase("incremental-update", t)
 
-	// Always regenerate search data, redirects, sitemaps (fast).
 	if err := splitSearchData(opts.PublicDir, cfg.Main.Output, cfg.Shards); err != nil {
 		return nil, fmt.Errorf("split search: %w", err)
 	}
@@ -1220,21 +1258,29 @@ func Split(opts Options) ([]SiteSummary, error) {
 
 	allSites := append([]*Site{cfg.Main}, cfg.Shards...)
 
+	if opts.ManifestFile == "" {
+		opts.ManifestFile = "public-manifest.json"
+	}
+
 	// Load git lastmods (needed for both paths).
 	dates, _ := loadGitLastmods(opts.LastmodsFile, opts.ContentRoot)
 
-	// Incremental mode: if Since > 0 and all output dirs already exist (cached),
-	// only update files that Hugo wrote in this run.
-	if opts.Since > 0 {
-		allExist := true
-		for _, s := range allSites {
-			if _, err := os.Stat(s.Output); os.IsNotExist(err) {
-				allExist = false
-				break
+	// Incremental mode: if manifest + all output dirs exist (cached from previous run),
+	// only re-split files whose size changed vs the manifest.
+	if opts.Incremental {
+		manifest := loadManifest(opts.ManifestFile)
+		if manifest != nil {
+			allExist := true
+			for _, s := range allSites {
+				if _, err := os.Stat(s.Output); os.IsNotExist(err) {
+					allExist = false
+					break
+				}
 			}
-		}
-		if allExist {
-			return splitIncremental(opts, cfg, allSites, dates)
+			if allExist {
+				changed := findChangedByManifest(opts.PublicDir, manifest)
+				return splitIncremental(opts, cfg, allSites, dates, changed)
+			}
 		}
 		fmt.Fprintf(os.Stderr, "tago split [incremental] cache miss — doing full split\n")
 	}
@@ -1371,6 +1417,9 @@ func Split(opts Options) ([]SiteSummary, error) {
 	if b, err := json.MarshalIndent(summaries, "", "  "); err == nil {
 		_ = os.WriteFile(opts.SummaryFile, b, 0644)
 	}
+
+	// Save public/ size manifest for next incremental run.
+	saveManifest(opts.PublicDir, opts.ManifestFile)
 
 	return summaries, nil
 }
