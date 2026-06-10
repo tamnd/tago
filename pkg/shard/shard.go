@@ -1,0 +1,1071 @@
+// Package shard splits a tago/hugo build output into per-subdomain deployments.
+// It copies files, rewrites URLs, splits search data, generates sitemaps, and
+// writes Cloudflare Pages _redirects files.
+package shard
+
+import (
+	"encoding/json"
+	"encoding/xml"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+// textSuffixes are the file types we rewrite URLs in.
+var textSuffixes = map[string]bool{
+	".html": true, ".css": true, ".js": true, ".json": true,
+	".xml": true, ".webmanifest": true, ".txt": true,
+}
+
+// sharedRootDirs are copied verbatim to every shard output.
+var sharedRootDirs = []string{"css", "js"}
+
+// sharedRootFiles are copied verbatim to every shard output.
+var sharedRootFiles = []string{
+	"404.html", "apple-touch-icon.png",
+	"favicon-16x16.png", "favicon-32x32.png",
+	"favicon.ico", "favicon.svg",
+	"site.webmanifest",
+}
+
+// localSharedPrefixes are URL paths that must stay local even in a shard context.
+var localSharedPrefixes = []string{
+	"/css/", "/js/", "/_worker",
+	"/apple-touch-icon.png", "/favicon",
+	"/site.webmanifest", "/en.search-data.json", "/sitemap.xml",
+}
+
+// -------------------------------------------------------------------------
+// Data types
+// -------------------------------------------------------------------------
+
+// Site describes one Cloudflare Pages deployment target.
+type Site struct {
+	Name         string // "main", "leetcode", …
+	Project      string // Cloudflare Pages project name
+	Domain       string // e.g. "brain.tamnd.com"
+	Output       string // destination directory
+	FileBudget   int    // max files allowed (0 = unlimited)
+	SourcePrefix string // e.g. "/practice/kvant/" — empty for main
+}
+
+// BaseURL returns "https://<domain>".
+func (s *Site) BaseURL() string { return "https://" + s.Domain }
+
+// Config is the parsed deploy-shards.toml.
+type Config struct {
+	Main   *Site
+	Shards []*Site
+}
+
+// Options controls the Split operation.
+type Options struct {
+	ConfigFile   string // path to deploy-shards.toml  (default: deploy-shards.toml)
+	PublicDir    string // path to built public/ dir    (default: public)
+	ContentRoot  string // for lastmods path mapping    (default: content/en)
+	LastmodsFile string // incremental cache            (default: content-lastmods.json)
+	SummaryFile  string // JSON summary output          (default: deploy-shards-summary.json)
+}
+
+// SiteSummary is one entry in the JSON summary written after a split.
+type SiteSummary struct {
+	Site    string `json:"site"`
+	Domain  string `json:"domain"`
+	Project string `json:"project"`
+	Files   int    `json:"files"`
+	Bytes   int64  `json:"bytes"`
+}
+
+// -------------------------------------------------------------------------
+// TOML parsing (deploy-shards.toml format only)
+// -------------------------------------------------------------------------
+
+func slashWrap(p string) string {
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	if !strings.HasSuffix(p, "/") {
+		p += "/"
+	}
+	return p
+}
+
+func trimComment(s string) string {
+	for i, c := range s {
+		if c == '#' {
+			return strings.TrimSpace(s[:i])
+		}
+	}
+	return strings.TrimSpace(s)
+}
+
+func parseKV(line string) (key, val string, ok bool) {
+	line = trimComment(line)
+	idx := strings.IndexByte(line, '=')
+	if idx < 0 {
+		return "", "", false
+	}
+	key = strings.TrimSpace(line[:idx])
+	val = strings.TrimSpace(line[idx+1:])
+	if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
+		val = val[1 : len(val)-1]
+	}
+	if key == "" || val == "" {
+		return "", "", false
+	}
+	return key, val, true
+}
+
+func applyField(s *Site, key, val string) {
+	switch key {
+	case "name":
+		s.Name = val
+	case "project":
+		s.Project = val
+	case "domain":
+		s.Domain = val
+	case "output":
+		s.Output = val
+	case "file_budget":
+		if n, err := strconv.Atoi(val); err == nil {
+			s.FileBudget = n
+		}
+	case "source_prefix":
+		s.SourcePrefix = slashWrap(val)
+	}
+}
+
+// ParseConfig parses a deploy-shards.toml byte slice.
+func ParseConfig(data []byte) (*Config, error) {
+	cfg := &Config{}
+	var current *Site
+
+	for _, rawLine := range strings.Split(string(data), "\n") {
+		line := trimComment(rawLine)
+		if line == "" {
+			continue
+		}
+		if line == "[[shards]]" {
+			current = &Site{}
+			cfg.Shards = append(cfg.Shards, current)
+			continue
+		}
+		if line == "[main]" {
+			if cfg.Main == nil {
+				cfg.Main = &Site{Name: "main"}
+			}
+			current = cfg.Main
+			continue
+		}
+		// Skip other section headers
+		if len(line) > 2 && line[0] == '[' && line[len(line)-1] == ']' {
+			current = nil
+			continue
+		}
+		if current == nil {
+			continue
+		}
+		k, v, ok := parseKV(rawLine)
+		if ok {
+			applyField(current, k, v)
+		}
+	}
+
+	if cfg.Main == nil {
+		return nil, fmt.Errorf("shard config: missing [main] section")
+	}
+	return cfg, nil
+}
+
+// -------------------------------------------------------------------------
+// URL mapping
+// -------------------------------------------------------------------------
+
+var (
+	// Matches href/src/action/content/poster attributes with absolute paths.
+	attrRe = regexp.MustCompile(
+		`(?i)((?:href|src|action|content|poster)=["'])(/[^"'<>{}\s]*)`,
+	)
+	// CSS url() in three quoting styles.
+	cssDoubleRe = regexp.MustCompile(`url\("(/[^"]+)"\)`)
+	cssSingleRe = regexp.MustCompile(`url\('(/[^']+)'\)`)
+	cssBareRe   = regexp.MustCompile(`url\((/[^)'"\s]+)\)`)
+	// Canonical link element (tago always outputs double-quoted href= in this order).
+	canonicalRe = regexp.MustCompile(`(<link rel="canonical" href=")([^"]+)(")`)
+)
+
+func isLocalShared(url string) bool {
+	for _, p := range localSharedPrefixes {
+		if strings.HasPrefix(url, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func slashURL(p string) string {
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	if !strings.HasSuffix(p, "/") {
+		p += "/"
+	}
+	return p
+}
+
+func splitSuffix(url string) (path, suffix string) {
+	for i, c := range url {
+		if c == '?' || c == '#' {
+			return url[:i], url[i:]
+		}
+	}
+	return url, ""
+}
+
+// shardPathFor returns the shard-relative path for url if it belongs to shard.
+// It preserves the trailing-slash behaviour of the input: directory-style paths
+// (/path/) stay as directories; file paths (/path/file.png) stay as files.
+func shardPathFor(urlPath string, shard *Site) (string, bool) {
+	if shard.SourcePrefix == "" {
+		return "", false
+	}
+	if !strings.HasPrefix(urlPath, "/") {
+		urlPath = "/" + urlPath
+	}
+	// Use a trailing-slash normalised copy ONLY for prefix comparison, so that
+	// "/practice/kvant" still matches prefix "/practice/kvant/" without adding
+	// a spurious slash to the result.
+	compare := urlPath
+	if !strings.HasSuffix(compare, "/") {
+		compare += "/"
+	}
+	if compare == shard.SourcePrefix {
+		return "/", true
+	}
+	if strings.HasPrefix(compare, shard.SourcePrefix) {
+		// Strip prefix from the original urlPath (preserves file vs. directory).
+		// SourcePrefix ends with "/"; trim the last char so we keep the leading "/".
+		remaining := urlPath[len(shard.SourcePrefix)-1:]
+		if !strings.HasPrefix(remaining, "/") {
+			remaining = "/" + remaining
+		}
+		return remaining, true
+	}
+	return "", false
+}
+
+// mapURL rewrites a single absolute path URL for the context of current site.
+func mapURL(url string, current, main *Site, shards []*Site) string {
+	if !strings.HasPrefix(url, "/") || strings.HasPrefix(url, "//") {
+		return url
+	}
+	// Shared assets stay local on all sites.
+	if current.Name != "main" && isLocalShared(url) {
+		return url
+	}
+	rawPath, suffix := splitSuffix(url)
+
+	for _, shard := range shards {
+		mapped, ok := shardPathFor(rawPath, shard)
+		if !ok {
+			continue
+		}
+		if current.Name == shard.Name {
+			return mapped + suffix
+		}
+		return shard.BaseURL() + mapped + suffix
+	}
+	if current.Name == "main" {
+		return url
+	}
+	return main.BaseURL() + url
+}
+
+// rewriteText applies all URL rewrites to an HTML/CSS/JS/… file body.
+func rewriteText(text string, current, main *Site, shards []*Site) string {
+	mapFn := func(u string) string { return mapURL(u, current, main, shards) }
+
+	// 1. Canonical URL — fix full absolute canonical for shard pages.
+	text = canonicalRe.ReplaceAllStringFunc(text, func(m string) string {
+		subs := canonicalRe.FindStringSubmatch(m)
+		if len(subs) != 4 {
+			return m
+		}
+		prefix, oldURL, quote := subs[1], subs[2], subs[3]
+		var urlPath string
+		for _, base := range []string{main.BaseURL(), "https://brain.tamnd.com"} {
+			if strings.HasPrefix(oldURL, base) {
+				urlPath = oldURL[len(base):]
+				if urlPath == "" {
+					urlPath = "/"
+				}
+				break
+			}
+		}
+		if urlPath == "" {
+			return m
+		}
+		mapped := mapFn(urlPath)
+		if strings.HasPrefix(mapped, "/") {
+			mapped = current.BaseURL() + mapped
+		}
+		return prefix + mapped + quote
+	})
+
+	// 2. href/src/action/content/poster attributes.
+	text = attrRe.ReplaceAllStringFunc(text, func(m string) string {
+		subs := attrRe.FindStringSubmatch(m)
+		if len(subs) != 3 {
+			return m
+		}
+		attrPrefix, url := subs[1], subs[2]
+		mapped := mapFn(url)
+		if mapped == url {
+			return m
+		}
+		return attrPrefix + mapped
+	})
+
+	// 3. CSS url() in all quoting styles.
+	rewriteCSS := func(re *regexp.Regexp, wrap func(string) string) {
+		text = re.ReplaceAllStringFunc(text, func(m string) string {
+			subs := re.FindStringSubmatch(m)
+			if len(subs) < 2 {
+				return m
+			}
+			url := subs[len(subs)-1]
+			mapped := mapFn(url)
+			if mapped == url {
+				return m
+			}
+			return wrap(mapped)
+		})
+	}
+	rewriteCSS(cssDoubleRe, func(u string) string { return `url("` + u + `")` })
+	rewriteCSS(cssSingleRe, func(u string) string { return "url('" + u + "')" })
+	rewriteCSS(cssBareRe, func(u string) string { return "url(" + u + ")" })
+
+	return text
+}
+
+func rewriteFile(path string, current, main *Site, shards []*Site) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	original := string(data)
+	rewritten := rewriteText(original, current, main, shards)
+	if rewritten == original {
+		return false, nil
+	}
+	return true, os.WriteFile(path, []byte(rewritten), 0644)
+}
+
+// rewriteTree rewrites all text files under root in parallel goroutines.
+func rewriteTree(root string, current, main *Site, shards []*Site) (int, error) {
+	var files []string
+	if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		if textSuffixes[strings.ToLower(filepath.Ext(path))] {
+			files = append(files, path)
+		}
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+
+	workers := runtime.NumCPU() * 2
+	if workers < 4 {
+		workers = 4
+	}
+	if workers > 32 {
+		workers = 32
+	}
+
+	var (
+		mu       sync.Mutex
+		count    int
+		firstErr error
+		wg       sync.WaitGroup
+		sem      = make(chan struct{}, workers)
+	)
+
+	for _, f := range files {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(path string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			changed, err := rewriteFile(path, current, main, shards)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+			} else if changed {
+				count++
+			}
+		}(f)
+	}
+	wg.Wait()
+	return count, firstErr
+}
+
+// -------------------------------------------------------------------------
+// File copying
+// -------------------------------------------------------------------------
+
+func copyFile(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
+}
+
+func copyDir(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(src, path)
+		dstPath := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(dstPath, 0755)
+		}
+		return copyFile(path, dstPath)
+	})
+}
+
+func copyTreeExcluding(src, dst string, excluded map[string]bool) error {
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(src, path)
+		if d.IsDir() && excluded[rel] {
+			return filepath.SkipDir
+		}
+		dstPath := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(dstPath, 0755)
+		}
+		return copyFile(path, dstPath)
+	})
+}
+
+func copyShared(publicDir, outDir string) error {
+	for _, dir := range sharedRootDirs {
+		src := filepath.Join(publicDir, dir)
+		if _, err := os.Stat(src); os.IsNotExist(err) {
+			continue
+		}
+		if err := copyDir(src, filepath.Join(outDir, dir)); err != nil {
+			return err
+		}
+	}
+	for _, file := range sharedRootFiles {
+		src := filepath.Join(publicDir, file)
+		if _, err := os.Stat(src); os.IsNotExist(err) {
+			continue
+		}
+		if err := copyFile(src, filepath.Join(outDir, file)); err != nil {
+			return err
+		}
+	}
+	// _worker*.js fingerprinted files
+	entries, _ := os.ReadDir(publicDir)
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasPrefix(e.Name(), "_worker") && strings.HasSuffix(e.Name(), ".js") {
+			src := filepath.Join(publicDir, e.Name())
+			if err := copyFile(src, filepath.Join(outDir, e.Name())); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// cleanDir removes .tago-cache.db and files larger than 24 MiB.
+func cleanDir(root string) {
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		if d.Name() == ".tago-cache.db" {
+			_ = os.Remove(path)
+			return nil
+		}
+		if info, err := d.Info(); err == nil && info.Size() > 24*1024*1024 {
+			_ = os.Remove(path)
+		}
+		return nil
+	})
+}
+
+// -------------------------------------------------------------------------
+// Search data splitting
+// -------------------------------------------------------------------------
+
+func splitSearchData(publicDir, mainOutput string, shards []*Site) error {
+	src := filepath.Join(publicDir, "en.search-data.json")
+	data, err := os.ReadFile(src)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	mainData := make(map[string]json.RawMessage)
+	shardData := make([]map[string]json.RawMessage, len(shards))
+	for i := range shards {
+		shardData[i] = make(map[string]json.RawMessage)
+	}
+
+	for key, val := range raw {
+		assigned := false
+		for i, shard := range shards {
+			if mapped, ok := shardPathFor(key, shard); ok {
+				shardData[i][mapped] = val
+				assigned = true
+				break
+			}
+		}
+		if !assigned {
+			mainData[key] = val
+		}
+	}
+
+	writeJSON := func(path string, m map[string]json.RawMessage) error {
+		b, err := json.Marshal(m)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(path, b, 0644)
+	}
+	if err := writeJSON(filepath.Join(mainOutput, "en.search-data.json"), mainData); err != nil {
+		return err
+	}
+	for i, shard := range shards {
+		if err := writeJSON(filepath.Join(shard.Output, "en.search-data.json"), shardData[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// -------------------------------------------------------------------------
+// Git lastmods (incremental cache)
+// -------------------------------------------------------------------------
+
+type lastmodsMap map[string]int64
+
+// loadGitLastmods returns lastmod timestamps for content files, using an
+// incremental JSON cache so only new commits are scanned on each run.
+func loadGitLastmods(cachePath, contentRoot string) (lastmodsMap, error) {
+	// Load existing cache.
+	var cachedRaw map[string]json.RawMessage
+	var sinceTS int64
+	if raw, err := os.ReadFile(cachePath); err == nil {
+		_ = json.Unmarshal(raw, &cachedRaw)
+		if cachedRaw != nil {
+			if tsRaw, ok := cachedRaw["__max_ts__"]; ok {
+				_ = json.Unmarshal(tsRaw, &sinceTS)
+				delete(cachedRaw, "__max_ts__")
+			}
+		}
+	}
+
+	// Build git log command (incremental if we have a prior timestamp).
+	args := []string{"log", "--format=@@%ct", "--name-only", "--", contentRoot}
+	if sinceTS > 0 {
+		after := time.Unix(sinceTS, 0).UTC().Format("2006-01-02T15:04:05Z")
+		args = append(args, "--after="+after)
+	}
+	out, err := exec.Command("git", args...).Output()
+	if err != nil {
+		// git not available or not a git repo — skip lastmods
+		return nil, nil
+	}
+
+	newDates := parseGitLog(string(out))
+
+	// Merge: convert cached to lastmodsMap then overlay new dates.
+	merged := make(lastmodsMap, len(cachedRaw)+len(newDates))
+	for k, v := range cachedRaw {
+		var ts int64
+		if json.Unmarshal(v, &ts) == nil {
+			merged[k] = ts
+		}
+	}
+	for k, v := range newDates {
+		merged[k] = v
+	}
+
+	// Save updated cache.
+	var maxTS int64
+	for _, ts := range merged {
+		if ts > maxTS {
+			maxTS = ts
+		}
+	}
+	cacheOut := make(map[string]interface{}, len(merged)+1)
+	for k, v := range merged {
+		cacheOut[k] = v
+	}
+	cacheOut["__max_ts__"] = maxTS
+	if b, err := json.Marshal(cacheOut); err == nil {
+		_ = os.WriteFile(cachePath, b, 0644)
+	}
+
+	return propagateParentDates(merged, contentRoot), nil
+}
+
+func parseGitLog(text string) lastmodsMap {
+	result := make(lastmodsMap)
+	var cur int64
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "@@") {
+			if ts, err := strconv.ParseInt(strings.TrimSpace(line[2:]), 10, 64); err == nil {
+				cur = ts
+			}
+		} else if line != "" && cur != 0 {
+			if _, exists := result[line]; !exists {
+				result[line] = cur
+			}
+		}
+	}
+	return result
+}
+
+func propagateParentDates(dates lastmodsMap, contentRoot string) lastmodsMap {
+	result := make(lastmodsMap, len(dates))
+	for k, v := range dates {
+		result[k] = v
+	}
+	root := filepath.Clean(contentRoot)
+	for filename, date := range dates {
+		parent := filepath.Dir(filepath.Clean(filename))
+		for {
+			rel, err := filepath.Rel(root, parent)
+			if err != nil || strings.HasPrefix(rel, "..") {
+				break
+			}
+			key := filepath.ToSlash(parent)
+			if existing, ok := result[key]; !ok || date > existing {
+				result[key] = date
+			}
+			if rel == "." {
+				break
+			}
+			parent = filepath.Dir(parent)
+		}
+	}
+	return result
+}
+
+// -------------------------------------------------------------------------
+// Sitemaps
+// -------------------------------------------------------------------------
+
+type xmlURLSet struct {
+	XMLName xml.Name `xml:"urlset"`
+	Xmlns   string   `xml:"xmlns,attr"`
+	URLs    []xmlURL `xml:"url"`
+}
+
+type xmlURL struct {
+	Loc     string `xml:"loc"`
+	Lastmod string `xml:"lastmod,omitempty"`
+}
+
+type xmlSitemapIndex struct {
+	XMLName  xml.Name     `xml:"sitemapindex"`
+	Xmlns    string       `xml:"xmlns,attr"`
+	Sitemaps []xmlSitemap `xml:"sitemap"`
+}
+
+type xmlSitemap struct {
+	Loc     string `xml:"loc"`
+	Lastmod string `xml:"lastmod,omitempty"`
+}
+
+func pathToURLKey(path, root string) (string, bool) {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return "", false
+	}
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	if len(parts) == 0 || parts[len(parts)-1] != "index.html" {
+		return "", false
+	}
+	if strings.HasPrefix(parts[0], "..") {
+		return "", false
+	}
+	if len(parts) == 1 {
+		return "/", true
+	}
+	return "/" + strings.Join(parts[:len(parts)-1], "/") + "/", true
+}
+
+func contentPathForURL(site *Site, urlPath string) string {
+	var orig string
+	if site.SourcePrefix != "" {
+		orig = strings.Trim(site.SourcePrefix, "/")
+		if urlPath != "/" {
+			orig += "/" + strings.Trim(urlPath, "/")
+		}
+	} else {
+		orig = strings.Trim(urlPath, "/")
+	}
+	return filepath.Join("content", "en", filepath.FromSlash(orig))
+}
+
+func lastmodForURL(site *Site, urlPath string, dates lastmodsMap) string {
+	if dates == nil {
+		return ""
+	}
+	base := contentPathForURL(site, urlPath)
+	fwd := filepath.ToSlash(base)
+	var ts int64
+	for _, candidate := range []string{fwd + ".md", fwd + "/_index.md", fwd} {
+		if t, ok := dates[candidate]; ok && t > ts {
+			ts = t
+		}
+	}
+	if ts == 0 {
+		return ""
+	}
+	return time.Unix(ts, 0).UTC().Format("2006-01-02T15:04:05Z")
+}
+
+func writeURLSet(path string, urls []xmlURL) (string, error) {
+	urlset := xmlURLSet{
+		Xmlns: "http://www.sitemaps.org/schemas/sitemap/0.9",
+		URLs:  urls,
+	}
+	b, err := xml.MarshalIndent(urlset, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	content := `<?xml version="1.0" encoding="UTF-8"?>` + "\n" + string(b) + "\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		return "", err
+	}
+	var maxLastmod string
+	for _, u := range urls {
+		if u.Lastmod > maxLastmod {
+			maxLastmod = u.Lastmod
+		}
+	}
+	return maxLastmod, nil
+}
+
+func writeSitemapIndex(path string, sitemaps []xmlSitemap) error {
+	idx := xmlSitemapIndex{
+		Xmlns:    "http://www.sitemaps.org/schemas/sitemap/0.9",
+		Sitemaps: sitemaps,
+	}
+	b, err := xml.MarshalIndent(idx, "", "  ")
+	if err != nil {
+		return err
+	}
+	content := `<?xml version="1.0" encoding="UTF-8"?>` + "\n" + string(b) + "\n"
+	return os.WriteFile(path, []byte(content), 0644)
+}
+
+func writeRobots(site *Site) error {
+	body := fmt.Sprintf("User-agent: *\nAllow: /\n\nSitemap: %s/sitemap.xml\n", site.BaseURL())
+	return os.WriteFile(filepath.Join(site.Output, "robots.txt"), []byte(body), 0644)
+}
+
+func generateSitemaps(main *Site, shards []*Site, dates lastmodsMap) error {
+	var shardEntries []xmlSitemap
+
+	for _, shard := range shards {
+		var urls []xmlURL
+		_ = filepath.WalkDir(shard.Output, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || d.Name() != "index.html" {
+				return err
+			}
+			urlPath, ok := pathToURLKey(path, shard.Output)
+			if !ok {
+				return nil
+			}
+			urls = append(urls, xmlURL{
+				Loc:     shard.BaseURL() + urlPath,
+				Lastmod: lastmodForURL(shard, urlPath, dates),
+			})
+			return nil
+		})
+		lastmod, err := writeURLSet(filepath.Join(shard.Output, "sitemap.xml"), urls)
+		if err != nil {
+			return err
+		}
+		if err := writeRobots(shard); err != nil {
+			return err
+		}
+		shardEntries = append(shardEntries, xmlSitemap{
+			Loc:     shard.BaseURL() + "/sitemap.xml",
+			Lastmod: lastmod,
+		})
+	}
+
+	var mainURLs []xmlURL
+	_ = filepath.WalkDir(main.Output, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || d.Name() != "index.html" {
+			return err
+		}
+		urlPath, ok := pathToURLKey(path, main.Output)
+		if !ok {
+			return nil
+		}
+		mainURLs = append(mainURLs, xmlURL{
+			Loc:     main.BaseURL() + urlPath,
+			Lastmod: lastmodForURL(main, urlPath, dates),
+		})
+		return nil
+	})
+	mainLastmod, err := writeURLSet(filepath.Join(main.Output, "sitemap-main.xml"), mainURLs)
+	if err != nil {
+		return err
+	}
+
+	allSitemaps := []xmlSitemap{{Loc: main.BaseURL() + "/sitemap-main.xml", Lastmod: mainLastmod}}
+	allSitemaps = append(allSitemaps, shardEntries...)
+	if err := writeSitemapIndex(filepath.Join(main.Output, "sitemap.xml"), allSitemaps); err != nil {
+		return err
+	}
+	return writeRobots(main)
+}
+
+// -------------------------------------------------------------------------
+// Redirects
+// -------------------------------------------------------------------------
+
+func writeRedirects(main *Site, shards []*Site) error {
+	var mainLines []string
+	for _, shard := range shards {
+		p := shard.SourcePrefix
+		mainLines = append(mainLines,
+			p+" "+shard.BaseURL()+"/ 301",
+			p+"* "+shard.BaseURL()+"/:splat 301",
+		)
+	}
+	if err := os.WriteFile(
+		filepath.Join(main.Output, "_redirects"),
+		[]byte(strings.Join(mainLines, "\n")+"\n"), 0644,
+	); err != nil {
+		return err
+	}
+	for _, shard := range shards {
+		p := shard.SourcePrefix
+		lines := []string{
+			p + " / 301",
+			p + "* /:splat 301",
+			"/" + shard.Name + "/ / 301",
+			"/" + shard.Name + "/* /:splat 301",
+		}
+		if err := os.WriteFile(
+			filepath.Join(shard.Output, "_redirects"),
+			[]byte(strings.Join(lines, "\n")+"\n"), 0644,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// -------------------------------------------------------------------------
+// Validation
+// -------------------------------------------------------------------------
+
+func validateSite(site *Site) (*SiteSummary, error) {
+	var count int
+	var total int64
+	if err := filepath.WalkDir(site.Output, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		count++
+		total += info.Size()
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	if site.FileBudget > 0 && count > site.FileBudget {
+		return nil, fmt.Errorf("%s: %d files exceeds budget %d", site.Name, count, site.FileBudget)
+	}
+	return &SiteSummary{
+		Site:    site.Name,
+		Domain:  site.Domain,
+		Project: site.Project,
+		Files:   count,
+		Bytes:   total,
+	}, nil
+}
+
+// -------------------------------------------------------------------------
+// Main entry point
+// -------------------------------------------------------------------------
+
+// Split is the full pipeline: copy → clean → rewrite → search → redirects →
+// sitemaps → validate. It mirrors split_cloudflare_pages_shards.py but runs
+// the URL-rewrite step in parallel Go goroutines (typically 6–10× faster).
+func Split(opts Options) ([]SiteSummary, error) {
+	if opts.ConfigFile == "" {
+		opts.ConfigFile = "deploy-shards.toml"
+	}
+	if opts.PublicDir == "" {
+		opts.PublicDir = "public"
+	}
+	if opts.ContentRoot == "" {
+		opts.ContentRoot = "content/en"
+	}
+	if opts.LastmodsFile == "" {
+		opts.LastmodsFile = "content-lastmods.json"
+	}
+	if opts.SummaryFile == "" {
+		opts.SummaryFile = "deploy-shards-summary.json"
+	}
+
+	// 1. Load config.
+	cfgData, err := os.ReadFile(opts.ConfigFile)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	cfg, err := ParseConfig(cfgData)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := os.Stat(opts.PublicDir); os.IsNotExist(err) {
+		return nil, fmt.Errorf("missing build output: %s", opts.PublicDir)
+	}
+
+	allSites := append([]*Site{cfg.Main}, cfg.Shards...)
+
+	// 2. Remove stale outputs.
+	for _, s := range allSites {
+		if err := os.RemoveAll(s.Output); err != nil {
+			return nil, err
+		}
+	}
+
+	// 3. Copy: main (excluding shard dirs) + each shard + its shared assets.
+	excluded := make(map[string]bool)
+	for _, shard := range cfg.Shards {
+		if shard.SourcePrefix != "" {
+			excluded[strings.Trim(shard.SourcePrefix, "/")] = true
+		}
+	}
+	if err := copyTreeExcluding(opts.PublicDir, cfg.Main.Output, excluded); err != nil {
+		return nil, fmt.Errorf("copy main: %w", err)
+	}
+	for _, shard := range cfg.Shards {
+		src := filepath.Join(opts.PublicDir, strings.Trim(shard.SourcePrefix, "/"))
+		if _, err := os.Stat(src); os.IsNotExist(err) {
+			return nil, fmt.Errorf("missing shard source: %s", src)
+		}
+		if err := copyDir(src, shard.Output); err != nil {
+			return nil, fmt.Errorf("copy shard %s: %w", shard.Name, err)
+		}
+		if err := copyShared(opts.PublicDir, shard.Output); err != nil {
+			return nil, fmt.Errorf("copy shared to %s: %w", shard.Name, err)
+		}
+	}
+
+	// 4. Clean oversized / leaked DB files.
+	for _, s := range allSites {
+		cleanDir(s.Output)
+	}
+
+	// 5. Rewrite URLs — run all sites in parallel for maximum throughput.
+	var (
+		rewriteWG  sync.WaitGroup
+		rewriteMu  sync.Mutex
+		rewriteErr error
+	)
+	for _, s := range allSites {
+		rewriteWG.Add(1)
+		go func(site *Site) {
+			defer rewriteWG.Done()
+			_, err := rewriteTree(site.Output, site, cfg.Main, cfg.Shards)
+			if err != nil {
+				rewriteMu.Lock()
+				if rewriteErr == nil {
+					rewriteErr = err
+				}
+				rewriteMu.Unlock()
+			}
+		}(s)
+	}
+	rewriteWG.Wait()
+	if rewriteErr != nil {
+		return nil, fmt.Errorf("rewrite: %w", rewriteErr)
+	}
+
+	// 6. Split search data.
+	if err := splitSearchData(opts.PublicDir, cfg.Main.Output, cfg.Shards); err != nil {
+		return nil, fmt.Errorf("split search: %w", err)
+	}
+
+	// 7. Write _redirects.
+	if err := writeRedirects(cfg.Main, cfg.Shards); err != nil {
+		return nil, fmt.Errorf("write redirects: %w", err)
+	}
+
+	// 8. Sitemaps (git lastmods optional but included when available).
+	dates, _ := loadGitLastmods(opts.LastmodsFile, opts.ContentRoot)
+	if err := generateSitemaps(cfg.Main, cfg.Shards, dates); err != nil {
+		return nil, fmt.Errorf("generate sitemaps: %w", err)
+	}
+
+	// 9. Validate and collect summary.
+	var summaries []SiteSummary
+	for _, s := range allSites {
+		sum, err := validateSite(s)
+		if err != nil {
+			return nil, err
+		}
+		summaries = append(summaries, *sum)
+	}
+
+	// Write summary JSON.
+	if b, err := json.MarshalIndent(summaries, "", "  "); err == nil {
+		_ = os.WriteFile(opts.SummaryFile, b, 0644)
+	}
+
+	return summaries, nil
+}

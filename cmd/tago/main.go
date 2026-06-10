@@ -11,9 +11,10 @@ import (
 
 	"github.com/tamnd/tago/pkg/build"
 	"github.com/tamnd/tago/pkg/server"
+	"github.com/tamnd/tago/pkg/shard"
 )
 
-const version = "0.2.0"
+const version = "0.3.0"
 
 func main() {
 	log.SetFlags(0)
@@ -31,6 +32,8 @@ func main() {
 		runServe(os.Args[2:])
 	case "clean":
 		runClean(os.Args[2:])
+	case "split":
+		runSplit(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println("tago", version)
 	case "help", "--help", "-h":
@@ -49,6 +52,7 @@ Usage:
   tago build   [flags]  Build the site
   tago serve   [flags]  Start dev server with live reload
   tago clean   [flags]  Remove output directory
+  tago split   [flags]  Split public/ into per-subdomain shard outputs
   tago version          Print version
 
 Build flags:
@@ -63,6 +67,12 @@ Build flags:
 Serve flags:
   --port <port>      HTTP port (default: 1313)
   (all build flags also apply)
+
+Split flags:
+  --config <path>    deploy-shards.toml path    (default: deploy-shards.toml)
+  --public <dir>     Built site directory        (default: public)
+  --lastmods <path>  Incremental lastmods cache  (default: content-lastmods.json)
+  --summary <path>   JSON summary output path    (default: deploy-shards-summary.json)
 `)
 }
 
@@ -202,10 +212,17 @@ func parseFlags(args []string) *flags {
 	return f
 }
 
-// loadTOML reads settings from tago.toml if present.
-// Supports [params] and [taxonomies] sections.
+// loadTOML reads settings from tago.toml (preferred), hugo.toml, or config.toml.
+// Supports [params] and [taxonomies] sections plus Hugo key aliases.
 func loadTOML(f *flags) {
-	data, err := os.ReadFile("tago.toml")
+	var data []byte
+	var err error
+	for _, name := range []string{"tago.toml", "hugo.toml", "config.toml"} {
+		data, err = os.ReadFile(name)
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
 		return
 	}
@@ -254,7 +271,7 @@ func loadTOML(f *flags) {
 				if f.content == "content" {
 					f.content = val
 				}
-			case "outputDir":
+			case "outputDir", "publishDir":
 				if f.output == "public" {
 					f.output = val
 				}
@@ -441,4 +458,46 @@ func runClean(args []string) {
 		log.Fatalf("clean failed: %v", err)
 	}
 	fmt.Printf("tago: removed %s\n", f.output)
+}
+
+func runSplit(args []string) {
+	opts := shard.Options{
+		ConfigFile:   "deploy-shards.toml",
+		PublicDir:    "public",
+		LastmodsFile: "content-lastmods.json",
+		SummaryFile:  "deploy-shards-summary.json",
+	}
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--config":
+			i++
+			if i < len(args) {
+				opts.ConfigFile = args[i]
+			}
+		case "--public":
+			i++
+			if i < len(args) {
+				opts.PublicDir = args[i]
+			}
+		case "--lastmods":
+			i++
+			if i < len(args) {
+				opts.LastmodsFile = args[i]
+			}
+		case "--summary":
+			i++
+			if i < len(args) {
+				opts.SummaryFile = args[i]
+			}
+		}
+	}
+
+	summaries, err := shard.Split(opts)
+	if err != nil {
+		log.Fatalf("split failed: %v", err)
+	}
+	for _, s := range summaries {
+		fmt.Printf("tago split: %s — %d files, %d bytes → %s\n",
+			s.Site, s.Files, s.Bytes, s.Domain)
+	}
 }
