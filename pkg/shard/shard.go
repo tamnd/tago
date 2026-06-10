@@ -445,22 +445,66 @@ func copyFile(src, dst string) error {
 	return err
 }
 
+// copyDir copies src to dst recursively using parallel goroutines for files.
 func copyDir(src, dst string) error {
-	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
+	// First pass: create all directories.
+	if err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
 			return err
 		}
 		rel, _ := filepath.Rel(src, path)
-		dstPath := filepath.Join(dst, rel)
-		if d.IsDir() {
-			return os.MkdirAll(dstPath, 0755)
+		return os.MkdirAll(filepath.Join(dst, rel), 0755)
+	}); err != nil {
+		return err
+	}
+	// Second pass: collect all file pairs.
+	type pair struct{ src, dst string }
+	var files []pair
+	if err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
 		}
-		return copyFile(path, dstPath)
-	})
+		rel, _ := filepath.Rel(src, path)
+		files = append(files, pair{path, filepath.Join(dst, rel)})
+		return nil
+	}); err != nil {
+		return err
+	}
+	// Third pass: parallel file copy.
+	workers := runtime.NumCPU() * 4
+	if workers < 8 {
+		workers = 8
+	}
+	var (
+		mu       sync.Mutex
+		firstErr error
+		wg       sync.WaitGroup
+		sem      = make(chan struct{}, workers)
+	)
+	for _, p := range files {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(p pair) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if err := copyFile(p.src, p.dst); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+			}
+		}(p)
+	}
+	wg.Wait()
+	return firstErr
 }
 
+// copyTreeExcluding copies src to dst, skipping top-level dirs in excluded, using parallel goroutines.
 func copyTreeExcluding(src, dst string, excluded map[string]bool) error {
-	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+	type pair struct{ src, dst string }
+	var files []pair
+	if err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -472,8 +516,38 @@ func copyTreeExcluding(src, dst string, excluded map[string]bool) error {
 		if d.IsDir() {
 			return os.MkdirAll(dstPath, 0755)
 		}
-		return copyFile(path, dstPath)
-	})
+		files = append(files, pair{path, dstPath})
+		return nil
+	}); err != nil {
+		return err
+	}
+	workers := runtime.NumCPU() * 4
+	if workers < 8 {
+		workers = 8
+	}
+	var (
+		mu       sync.Mutex
+		firstErr error
+		wg       sync.WaitGroup
+		sem      = make(chan struct{}, workers)
+	)
+	for _, p := range files {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(p pair) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if err := copyFile(p.src, p.dst); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+			}
+		}(p)
+	}
+	wg.Wait()
+	return firstErr
 }
 
 func copyShared(publicDir, outDir string) error {
