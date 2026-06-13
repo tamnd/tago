@@ -494,7 +494,6 @@ func Build(cfg *Config) (*Stats, error) {
 	}
 	if structuralChange {
 		tasks = append(tasks,
-			indexTask{"graph", func() error { return index.BuildGraphJSON(pageSlice, cfg.OutputDir) }},
 			indexTask{"tree", func() error { return index.BuildTreeJSON(pageSlice, cfg.OutputDir) }},
 			indexTask{"calendar", func() error { return index.BuildCalendarJSON(pageSlice, cfg.OutputDir) }},
 			indexTask{"404", func() error { return renderer.Render404(cfg.OutputDir, pageSlice) }},
