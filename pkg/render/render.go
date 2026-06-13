@@ -1332,6 +1332,10 @@ type paginatorStub struct {
 	totalPages int
 	totalItems int
 	baseURL    string
+	// year-based pagination fields (set only in year mode)
+	yearLabel string         // "2024", "2025", etc.; "" = home (/)
+	prevPag   *paginatorStub // explicit prev link for year-based nav
+	nextPag   *paginatorStub // explicit next link for year-based nav
 }
 
 func (p *paginatorStub) isReal() bool { return p.totalPages > 1 }
@@ -1356,10 +1360,18 @@ func (p *paginatorStub) TotalNumberOfElements() int {
 }
 func (p *paginatorStub) NumberOfElements() int { return len(p.pageItems) }
 func (p *paginatorStub) TotalItems() int       { return p.TotalNumberOfElements() }
-func (p *paginatorStub) HasNext() bool              { return p.isReal() && p.pageNum < p.totalPages }
-func (p *paginatorStub) HasPrev() bool              { return p.isReal() && p.pageNum > 1 }
+// isHome returns true when this is the / sentinel page (pageNum == totalPages+1).
+func (p *paginatorStub) isHome() bool { return p.isReal() && p.pageNum > p.totalPages }
+
+// Pages are numbered oldest-first: 1 = oldest, totalPages = newest numbered.
+// / (home) is a sentinel with pageNum = totalPages+1.
+// "Next" means newer (higher page number / towards /).
+// "Prev" means older (lower page number).
 func (p *paginatorStub) URL() string {
-	if !p.isReal() || p.pageNum <= 1 {
+	if p.yearLabel != "" {
+		return "/" + p.yearLabel + "/"
+	}
+	if !p.isReal() || p.isHome() {
 		return "/"
 	}
 	return fmt.Sprintf("/page/%d/", p.pageNum)
@@ -1373,20 +1385,72 @@ func (p *paginatorStub) Permalink() string {
 	}
 	return base + u
 }
+// Label returns a human-readable label for this pagination page.
+// For year-based pages it returns the year string (e.g. "2024").
+// For size-based pages it returns the page number as string.
+func (p *paginatorStub) Label() string {
+	if p.yearLabel != "" {
+		return p.yearLabel
+	}
+	if p.isHome() || !p.isReal() {
+		return ""
+	}
+	return strconv.Itoa(p.pageNum)
+}
 func (p *paginatorStub) pageAt(n int) *paginatorStub {
 	return &paginatorStub{pageNum: n, totalPages: p.totalPages, baseURL: p.baseURL}
 }
 func (p *paginatorStub) Next() *paginatorStub {
+	if p.nextPag != nil {
+		return p.nextPag
+	}
 	if !p.HasNext() {
 		return nil
 	}
-	return p.pageAt(p.pageNum + 1)
+	if !p.isHome() {
+		next := p.pageNum + 1
+		if next > p.totalPages {
+			return p.pageAt(p.totalPages + 1)
+		}
+		return p.pageAt(next)
+	}
+	return nil
 }
 func (p *paginatorStub) Prev() *paginatorStub {
+	if p.prevPag != nil {
+		return p.prevPag
+	}
 	if !p.HasPrev() {
 		return nil
 	}
+	if p.isHome() {
+		return p.pageAt(p.totalPages)
+	}
 	return p.pageAt(p.pageNum - 1)
+}
+func (p *paginatorStub) HasNext() bool {
+	if p.nextPag != nil {
+		return true
+	}
+	if !p.isReal() {
+		return false
+	}
+	if !p.isHome() {
+		return true
+	}
+	return false
+}
+func (p *paginatorStub) HasPrev() bool {
+	if p.prevPag != nil {
+		return true
+	}
+	if !p.isReal() {
+		return false
+	}
+	if p.isHome() {
+		return p.totalPages >= 1
+	}
+	return p.pageNum > 1
 }
 func (p *paginatorStub) First() *paginatorStub { return p.pageAt(1) }
 func (p *paginatorStub) Last() *paginatorStub  { return p.pageAt(p.totalPages) }
@@ -1488,6 +1552,7 @@ type Renderer struct {
 	layoutsDir    string
 	liveReload    bool
 	paginateBy    int
+	paginateMode  string // "year" | "" (default: size-based)
 	tmplCache     map[string]*template.Template
 	partialCache  map[string]*template.Template
 	tmplMu        sync.Mutex
@@ -1496,13 +1561,14 @@ type Renderer struct {
 }
 
 // New creates a new Renderer.
-func New(site *SiteData, assets AssetRefs, layoutsDir string, liveReload bool, paginateBy int) *Renderer {
+func New(site *SiteData, assets AssetRefs, layoutsDir string, liveReload bool, paginateBy int, paginateMode string) *Renderer {
 	r := &Renderer{
 		site:         site,
 		assets:       assets,
 		layoutsDir:   layoutsDir,
 		liveReload:   liveReload,
 		paginateBy:   paginateBy,
+		paginateMode: paginateMode,
 		tmplCache:    make(map[string]*template.Template),
 		partialCache: make(map[string]*template.Template),
 	}
@@ -4410,6 +4476,9 @@ func (r *Renderer) RenderPage(page *content.Page, allPages []*content.Page) erro
 				}
 			}
 		case "home":
+			if r.paginateMode == "year" {
+				return r.renderHomePaginatedByYear(page, allPages)
+			}
 			return r.renderHomePaginated(page, allPages)
 		}
 	}
@@ -4417,14 +4486,28 @@ func (r *Renderer) RenderPage(page *content.Page, allPages []*content.Page) erro
 	return r.renderToFileFor(templateName, page.OutputPath, data, page.Type, page.Layout, page.Section, page.Lang)
 }
 
-// renderHomePaginated generates /, /page/2/, /page/3/, … for the home page.
+// renderHomePaginated generates / and /page/1/, /page/2/, … for the home page.
+//
+// Pages are numbered oldest-first: /page/1/ holds the oldest posts and never
+// changes once written; newer posts only touch the last one or two pages plus /.
+// This keeps Cloudflare Pages uploads minimal on daily deploys.
+//
+// Layout:
+//   /           — newest pageSize items (always regenerated; 1 file changes daily)
+//   /page/1/    — oldest items (stable forever)
+//   /page/2/    — next oldest (stable)
+//   /page/N/    — second-newest batch (changes only when / overflows)
+//
+// Each numbered page is written only when its rendered content differs from the
+// existing file on disk (skip-if-unchanged), so unchanged old pages cost zero
+// disk I/O and zero Cloudflare upload slots.
 func (r *Renderer) renderHomePaginated(page *content.Page, allPages []*content.Page) error {
 	pageSize := r.paginateBy
 	if pageSize <= 0 {
 		pageSize = 10
 	}
 
-	// Collect and sort all dated leaf pages.
+	// Collect all dated leaf pages, sort newest-first (for / display order).
 	var all HugoPageList
 	for _, p := range allPages {
 		if p.Kind == "page" && !p.Draft && !p.Date.IsZero() {
@@ -4447,55 +4530,232 @@ func (r *Renderer) renderHomePaginated(page *content.Page, allPages []*content.P
 		baseURL = r.site.BaseURL
 	}
 
-	for pageNum := 1; pageNum <= totalPages; pageNum++ {
-		start := (pageNum - 1) * pageSize
-		end := start + pageSize
-		if end > totalItems {
-			end = totalItems
-		}
-		var pageItems HugoPageList
-		if start < totalItems {
-			pageItems = all[start:end]
-		}
+	// Pre-compute sidebar once — it's identical for all pagination pages.
+	sidebarRoot := determineSidebarRoot(page)
+	sidebarBack := determineSidebarBack(page)
+	var sidebarItems []*SidebarItem
+	if sidebarRoot != nil {
+		sidebarItems = buildSidebarItems(sidebarRoot, page.RelPermalink)
+	}
 
+	// renderPage renders one pagination page and writes it only if content changed.
+	// pageNum is the display number (1 = oldest, totalPages = newest numbered page).
+	// items is the slice of pages to show (newest-first within the slice).
+	renderPage := func(pageNum int, items HugoPageList, outputPath string) error {
 		pag := &paginatorStub{
-			pageItems:  pageItems,
+			pageItems:  items,
 			pageNum:    pageNum,
 			totalPages: totalPages,
 			totalItems: totalItems,
 			baseURL:    baseURL,
 		}
-
 		data := &TemplateData{
 			Page:          page,
 			Site:          r.site,
 			Assets:        r.assets,
-			Pages:         pageItems,
+			Pages:         items,
 			paginatorData: pag,
+			SidebarRoot:   sidebarRoot,
+			SidebarBack:   sidebarBack,
+			SidebarItems:  sidebarItems,
 		}
+		return r.renderToFileIfChanged("home", outputPath, data, page.Type, page.Layout, page.Section, page.Lang)
+	}
 
-		sidebarRoot := determineSidebarRoot(page)
-		data.SidebarRoot = sidebarRoot
-		data.SidebarBack = determineSidebarBack(page)
-		if sidebarRoot != nil {
-			data.SidebarItems = buildSidebarItems(sidebarRoot, page.RelPermalink)
+	// Generate numbered pages oldest-first: /page/1/ .. /page/totalPages/.
+	// all is sorted newest-first, so chunk 0 = newest, chunk totalPages-1 = oldest.
+	// pageNum 1 maps to chunk totalPages-1 (oldest), pageNum N maps to chunk 0 (newest).
+	for pageNum := 1; pageNum <= totalPages; pageNum++ {
+		chunkIdx := totalPages - pageNum // 0 = newest chunk, totalPages-1 = oldest chunk
+		start := chunkIdx * pageSize
+		end := start + pageSize
+		if end > totalItems {
+			end = totalItems
 		}
+		pageItems := all[start:end]
 
-		var outputPath string
-		if pageNum == 1 {
-			outputPath = page.OutputPath
-		} else {
-			outputPath = filepath.Join(outputDir, "page", strconv.Itoa(pageNum), "index.html")
-			if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
-				return err
-			}
+		outputPath := filepath.Join(outputDir, "page", strconv.Itoa(pageNum), "index.html")
+		if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+			return err
 		}
-
-		if err := r.renderToFileFor("home", outputPath, data, page.Type, page.Layout, page.Section, page.Lang); err != nil {
+		if err := renderPage(pageNum, pageItems, outputPath); err != nil {
 			return err
 		}
 	}
-	return nil
+
+	// / always shows the newest items (chunk 0) — regenerated unconditionally.
+	newestItems := all
+	if len(all) > pageSize {
+		newestItems = all[:pageSize]
+	}
+	homePag := &paginatorStub{
+		pageItems:  newestItems,
+		pageNum:    totalPages + 1, // sentinel: "home" is beyond the numbered sequence
+		totalPages: totalPages,
+		totalItems: totalItems,
+		baseURL:    baseURL,
+	}
+	homeData := &TemplateData{
+		Page:          page,
+		Site:          r.site,
+		Assets:        r.assets,
+		Pages:         newestItems,
+		paginatorData: homePag,
+		SidebarRoot:   sidebarRoot,
+		SidebarBack:   sidebarBack,
+		SidebarItems:  sidebarItems,
+	}
+	return r.renderToFileFor("home", page.OutputPath, homeData, page.Type, page.Layout, page.Section, page.Lang)
+}
+
+// renderHomePaginatedByYear generates / and /YYYY/ pages for the home page.
+//
+// Each year gets its own stable archive page (/2024/, /2025/, …). The home
+// page (/) always shows the most recent year's posts and is regenerated daily.
+// Older year pages are written only when their content changes (skip-if-unchanged).
+func (r *Renderer) renderHomePaginatedByYear(page *content.Page, allPages []*content.Page) error {
+	// Collect all dated leaf pages.
+	var all HugoPageList
+	for _, p := range allPages {
+		if p.Kind == "page" && !p.Draft && !p.Date.IsZero() {
+			all = append(all, &HugoPage{Page: p, Site: r.site})
+		}
+	}
+	// Sort newest-first for display.
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].Page.Date.After(all[j].Page.Date)
+	})
+
+	totalItems := len(all)
+
+	// Group posts by year (newest-first within each group is preserved since all is sorted).
+	type yearGroup struct {
+		year  int
+		pages HugoPageList
+	}
+	yearMap := make(map[int]*yearGroup)
+	var years []int
+	for _, hp := range all {
+		y := hp.Page.Date.Year()
+		if _, ok := yearMap[y]; !ok {
+			yearMap[y] = &yearGroup{year: y}
+			years = append(years, y)
+		}
+		yearMap[y].pages = append(yearMap[y].pages, hp)
+	}
+	// Sort years ascending (oldest first) — index 0 = oldest year, last = newest.
+	sort.Ints(years)
+
+	totalPages := len(years) // each year is one page; / is the sentinel
+
+	outputDir := filepath.Dir(page.OutputPath)
+	baseURL := ""
+	if r.site != nil {
+		baseURL = r.site.BaseURL
+	}
+
+	// Pre-compute sidebar once.
+	sidebarRoot := determineSidebarRoot(page)
+	sidebarBack := determineSidebarBack(page)
+	var sidebarItems []*SidebarItem
+	if sidebarRoot != nil {
+		sidebarItems = buildSidebarItems(sidebarRoot, page.RelPermalink)
+	}
+
+	// Build paginator stubs for each year page (ascending order).
+	stubs := make([]*paginatorStub, len(years))
+	for i, y := range years {
+		stubs[i] = &paginatorStub{
+			pageItems:  yearMap[y].pages,
+			pageNum:    i + 1,
+			totalPages: totalPages,
+			totalItems: totalItems,
+			baseURL:    baseURL,
+			yearLabel:  strconv.Itoa(y),
+		}
+	}
+	// Link stubs as a doubly-linked list (older ← → newer).
+	for i := range stubs {
+		if i > 0 {
+			stubs[i].prevPag = stubs[i-1]
+		}
+		if i < len(stubs)-1 {
+			stubs[i].nextPag = stubs[i+1]
+		}
+	}
+
+	// Render each year page: /YYYY/index.html (skip if unchanged).
+	for i, y := range years {
+		outputPath := filepath.Join(outputDir, strconv.Itoa(y), "index.html")
+		if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+			return err
+		}
+		data := &TemplateData{
+			Page:          page,
+			Site:          r.site,
+			Assets:        r.assets,
+			Pages:         stubs[i].pageItems,
+			paginatorData: stubs[i],
+			SidebarRoot:   sidebarRoot,
+			SidebarBack:   sidebarBack,
+			SidebarItems:  sidebarItems,
+		}
+		if err := r.renderToFileIfChanged("home", outputPath, data, page.Type, page.Layout, page.Section, page.Lang); err != nil {
+			return err
+		}
+	}
+
+	// / always shows the most recent year's posts — regenerated unconditionally.
+	var newestItems HugoPageList
+	var newestStub *paginatorStub
+	if len(years) > 0 {
+		newestIdx := len(years) - 1
+		newestItems = stubs[newestIdx].pageItems
+		// Home sentinel: prevPag = newest year page (for "← 2025" navigation)
+		newestStub = &paginatorStub{
+			pageItems:  newestItems,
+			pageNum:    totalPages + 1, // sentinel beyond numbered sequence
+			totalPages: totalPages,
+			totalItems: totalItems,
+			baseURL:    baseURL,
+			prevPag:    stubs[newestIdx],
+		}
+	} else {
+		newestStub = &paginatorStub{totalItems: totalItems, baseURL: baseURL}
+	}
+	homeData := &TemplateData{
+		Page:          page,
+		Site:          r.site,
+		Assets:        r.assets,
+		Pages:         newestItems,
+		paginatorData: newestStub,
+		SidebarRoot:   sidebarRoot,
+		SidebarBack:   sidebarBack,
+		SidebarItems:  sidebarItems,
+	}
+	return r.renderToFileFor("home", page.OutputPath, homeData, page.Type, page.Layout, page.Section, page.Lang)
+}
+
+// renderToFileIfChanged renders a template to an in-memory buffer and writes it
+// to outputPath only when the content differs from the existing file.
+func (r *Renderer) renderToFileIfChanged(kind, outputPath string, data *TemplateData, pageType, layout, section, lang string) error {
+	t, err := r.getTemplateFor(kind, pageType, layout, section, lang)
+	if err != nil {
+		return err
+	}
+	var buf bytes.Buffer
+	buf.Grow(32 * 1024)
+	if err := t.Execute(&buf, data); err != nil {
+		return fmt.Errorf("execute template %q for %s: %w", kind, outputPath, err)
+	}
+	newBytes := buf.Bytes()
+	if existing, err := os.ReadFile(outputPath); err == nil && bytes.Equal(existing, newBytes) {
+		return nil // unchanged — skip write
+	}
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", filepath.Dir(outputPath), err)
+	}
+	return os.WriteFile(outputPath, newBytes, 0644)
 }
 
 // Render404 renders a 404.html page to outputDir/404.html.

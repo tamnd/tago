@@ -36,7 +36,8 @@ type Config struct {
 	Clean           bool
 	LiveReload      bool
 	SyntaxHighlight bool // enable Chroma server-side highlighting (slower builds)
-	PaginateBy      int  // number of posts per home page (default 10)
+	PaginateBy      int    // number of posts per home page (default 10)
+	PaginateMode    string // "year" for date-based pagination; default is size-based
 
 	// Build filtering (Hugo-compatible)
 	BuildDrafts   bool // --buildDrafts / buildDrafts in config
@@ -364,7 +365,7 @@ func Build(cfg *Config) (*Stats, error) {
 		Extra:      assetRefs.Extra,
 	}
 
-	renderer := render.New(site, rAssets, cfg.LayoutsDir, cfg.LiveReload, cfg.PaginateBy)
+	renderer := render.New(site, rAssets, cfg.LayoutsDir, cfg.LiveReload, cfg.PaginateBy, cfg.PaginateMode)
 
 	// Pre-warm all templates to initialize html/template's lazy auto-escaping.
 	// After this, concurrent Execute calls on the same template are safe without Clone().

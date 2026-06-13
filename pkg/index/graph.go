@@ -59,6 +59,12 @@ func BuildGraphData(pages []*content.Page) *GraphData {
 		if p.Draft {
 			continue
 		}
+		// Exclude leaf pages (kind=page) from the graph — they bloat the file size
+		// on large sites (25K+ pages → 27MB, exceeding Cloudflare Pages' 25MB limit).
+		// The graph is still meaningful: sections + tags give the structural overview.
+		if p.Kind == "page" {
+			continue
+		}
 		tags := p.Tags
 		if tags == nil {
 			tags = []string{}
@@ -81,7 +87,7 @@ func BuildGraphData(pages []*content.Page) *GraphData {
 				Kind:   "tree",
 			})
 		}
-		// tag links (bipartite: page → tag node)
+		// tag links (bipartite: section → tag node)
 		for _, t := range p.Tags {
 			tagID := "tag:" + t
 			links = append(links, GraphLink{

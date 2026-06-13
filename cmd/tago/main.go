@@ -92,7 +92,8 @@ type flags struct {
 	editURLBase     string
 	clean           bool
 	syntaxHighlight bool // enable Chroma server-side syntax highlighting
-	paginateBy      int  // posts per home page
+	paginateBy      int    // posts per home page
+	paginateMode    string // "year" | "" (default: size-based)
 	buildDrafts     bool
 	buildFuture     bool
 	buildExpired    bool
@@ -296,6 +297,8 @@ func loadTOML(f *flags) {
 				if n, err := strconv.Atoi(val); err == nil && n > 0 {
 					f.paginateBy = n
 				}
+			case "paginateMode", "paginate_mode":
+				f.paginateMode = val
 			case "buildDrafts", "build_drafts":
 				f.buildDrafts = val == "true" || val == "1" || val == "yes"
 			case "buildFuture", "build_future":
@@ -392,6 +395,7 @@ func runBuild(args []string) {
 		LiveReload:      false,
 		SyntaxHighlight: f.syntaxHighlight,
 		PaginateBy:      f.paginateBy,
+		PaginateMode:    f.paginateMode,
 		BuildDrafts:     f.buildDrafts,
 		BuildFuture:     f.buildFuture,
 		BuildExpired:    f.buildExpired,
@@ -431,6 +435,7 @@ func runServe(args []string) {
 		LiveReload:      true,
 		SyntaxHighlight: f.syntaxHighlight,
 		PaginateBy:      f.paginateBy,
+		PaginateMode:    f.paginateMode,
 		BuildDrafts:     f.buildDrafts,
 		BuildFuture:     f.buildFuture,
 		BuildExpired:    f.buildExpired,
