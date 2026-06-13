@@ -1605,9 +1605,45 @@ func determineSidebarBack(page *content.Page) *content.Page {
 // buildSidebarItems recursively converts a page's children into SidebarItems.
 // Only the active path (the branch containing currentURL) is expanded;
 // sibling branches are collapsed to their section link only.
+//
+// When a section has more than sidebarMaxItems children, only the window
+// [active-sidebarContext .. active+sidebarContext] is rendered. This prevents
+// sections with hundreds of children (e.g. 1400 codeforces contests) from
+// bloating every page with a 200+ KB nav list.
+const sidebarMaxItems = 50
+const sidebarContext = 5 // siblings shown on each side of the active item when windowing
+
 func buildSidebarItems(root *content.Page, currentURL string) []*SidebarItem {
+	children := root.Children
+
+	// Window large sibling lists to keep page size reasonable.
+	if len(children) > sidebarMaxItems {
+		// Find the active child (or first child of the active subtree).
+		activeIdx := -1
+		for i, child := range children {
+			if child.RelPermalink == currentURL || isAncestorOf(child, currentURL) {
+				activeIdx = i
+				break
+			}
+		}
+		if activeIdx >= 0 {
+			lo := activeIdx - sidebarContext
+			if lo < 0 {
+				lo = 0
+			}
+			hi := activeIdx + sidebarContext + 1
+			if hi > len(children) {
+				hi = len(children)
+			}
+			children = children[lo:hi]
+		} else {
+			// No active child — show only the first sidebarMaxItems.
+			children = children[:sidebarMaxItems]
+		}
+	}
+
 	var items []*SidebarItem
-	for _, child := range root.Children {
+	for _, child := range children {
 		if child.Draft {
 			continue
 		}
@@ -1637,6 +1673,16 @@ func buildSidebarItems(root *content.Page, currentURL string) []*SidebarItem {
 		items = append(items, item)
 	}
 	return items
+}
+
+// isAncestorOf returns true if page is an ancestor of the URL (i.e. currentURL
+// starts with page.RelPermalink and the match is at a path boundary).
+func isAncestorOf(page *content.Page, currentURL string) bool {
+	prefix := page.RelPermalink
+	if prefix == "/" {
+		return true
+	}
+	return strings.HasPrefix(currentURL, prefix)
 }
 
 // markdownify renders a markdown snippet to HTML using goldmark.
