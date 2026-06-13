@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -91,6 +92,7 @@ type flags struct {
 	editURLBase     string
 	clean           bool
 	syntaxHighlight bool // enable Chroma server-side syntax highlighting
+	paginateBy      int  // posts per home page
 	buildDrafts     bool
 	buildFuture     bool
 	buildExpired    bool
@@ -290,6 +292,10 @@ func loadTOML(f *flags) {
 				}
 			case "syntaxHighlight", "syntax_highlight":
 				f.syntaxHighlight = val == "true" || val == "1" || val == "yes"
+			case "paginateBy", "paginate_by", "paginate":
+				if n, err := strconv.Atoi(val); err == nil && n > 0 {
+					f.paginateBy = n
+				}
 			case "buildDrafts", "build_drafts":
 				f.buildDrafts = val == "true" || val == "1" || val == "yes"
 			case "buildFuture", "build_future":
@@ -385,6 +391,7 @@ func runBuild(args []string) {
 		Clean:           f.clean,
 		LiveReload:      false,
 		SyntaxHighlight: f.syntaxHighlight,
+		PaginateBy:      f.paginateBy,
 		BuildDrafts:     f.buildDrafts,
 		BuildFuture:     f.buildFuture,
 		BuildExpired:    f.buildExpired,
@@ -423,6 +430,7 @@ func runServe(args []string) {
 		Clean:           f.clean,
 		LiveReload:      true,
 		SyntaxHighlight: f.syntaxHighlight,
+		PaginateBy:      f.paginateBy,
 		BuildDrafts:     f.buildDrafts,
 		BuildFuture:     f.buildFuture,
 		BuildExpired:    f.buildExpired,

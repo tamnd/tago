@@ -857,6 +857,7 @@ type TemplateData struct {
 	SidebarBack      *content.Page   // back-link target (nil = no back link)
 	PrevPage         *content.Page   // previous sibling (for pager)
 	NextPage         *content.Page   // next sibling (for pager)
+	paginatorData    *paginatorStub  // set by renderHomePaginated for real pagination
 	scratch          *Scratch
 	store            *Scratch
 }
@@ -1308,38 +1309,100 @@ func (d *TemplateData) TableOfContents() template.HTML {
 	return ""
 }
 
-// Paginate returns a stub Paginator for the given collection.
+// Paginate returns the real Paginator when set, otherwise a fallback stub.
 func (d *TemplateData) Paginate(pages any, args ...any) *paginatorStub {
-	return &paginatorStub{pages: d.Pages}
+	if d.paginatorData != nil {
+		return d.paginatorData
+	}
+	return &paginatorStub{pageItems: d.Pages}
 }
 
-// Paginator returns a stub Paginator object.
+// Paginator returns the real Paginator when set, otherwise a fallback stub.
 func (d *TemplateData) Paginator(args ...any) *paginatorStub {
-	return &paginatorStub{pages: d.Pages}
+	if d.paginatorData != nil {
+		return d.paginatorData
+	}
+	return &paginatorStub{pageItems: d.Pages}
 }
 
 // paginatorStub provides Hugo-compatible Paginator interface.
 type paginatorStub struct {
-	pages HugoPageList
+	pageItems  HugoPageList
+	pageNum    int // 1-indexed; 0 = stub (not paginated)
+	totalPages int
+	totalItems int
+	baseURL    string
 }
 
-func (p *paginatorStub) Pages() HugoPageList      { return p.pages }
-func (p *paginatorStub) PageNumber() int           { return 1 }
-func (p *paginatorStub) TotalPages() int           { return 1 }
-func (p *paginatorStub) TotalNumberOfElements() int { return len(p.pages) }
-func (p *paginatorStub) NumberOfElements() int     { return len(p.pages) }
-func (p *paginatorStub) HasNext() bool             { return false }
-func (p *paginatorStub) HasPrev() bool             { return false }
-func (p *paginatorStub) Next() *paginatorStub      { return nil }
-func (p *paginatorStub) Prev() *paginatorStub      { return nil }
-func (p *paginatorStub) First() *paginatorStub     { return p }
-func (p *paginatorStub) Last() *paginatorStub      { return p }
-func (p *paginatorStub) Pagers() []*paginatorStub  { return []*paginatorStub{p} }
-func (p *paginatorStub) URL() string               { return "" }
-func (p *paginatorStub) RelPermalink() string      { return "" }
-func (p *paginatorStub) Permalink() string         { return "" }
-func (p *paginatorStub) PageSize() int             { return 10 }
-func (p *paginatorStub) PageGroups() []pageGroup   { return nil }
+func (p *paginatorStub) isReal() bool { return p.totalPages > 1 }
+func (p *paginatorStub) Pages() HugoPageList { return p.pageItems }
+func (p *paginatorStub) PageNumber() int {
+	if p.isReal() {
+		return p.pageNum
+	}
+	return 1
+}
+func (p *paginatorStub) TotalPages() int {
+	if p.isReal() {
+		return p.totalPages
+	}
+	return 1
+}
+func (p *paginatorStub) TotalNumberOfElements() int {
+	if p.totalItems > 0 {
+		return p.totalItems
+	}
+	return len(p.pageItems)
+}
+func (p *paginatorStub) NumberOfElements() int { return len(p.pageItems) }
+func (p *paginatorStub) TotalItems() int       { return p.TotalNumberOfElements() }
+func (p *paginatorStub) HasNext() bool              { return p.isReal() && p.pageNum < p.totalPages }
+func (p *paginatorStub) HasPrev() bool              { return p.isReal() && p.pageNum > 1 }
+func (p *paginatorStub) URL() string {
+	if !p.isReal() || p.pageNum <= 1 {
+		return "/"
+	}
+	return fmt.Sprintf("/page/%d/", p.pageNum)
+}
+func (p *paginatorStub) RelPermalink() string { return p.URL() }
+func (p *paginatorStub) Permalink() string {
+	base := strings.TrimRight(p.baseURL, "/")
+	u := p.URL()
+	if u == "/" {
+		return base + "/"
+	}
+	return base + u
+}
+func (p *paginatorStub) pageAt(n int) *paginatorStub {
+	return &paginatorStub{pageNum: n, totalPages: p.totalPages, baseURL: p.baseURL}
+}
+func (p *paginatorStub) Next() *paginatorStub {
+	if !p.HasNext() {
+		return nil
+	}
+	return p.pageAt(p.pageNum + 1)
+}
+func (p *paginatorStub) Prev() *paginatorStub {
+	if !p.HasPrev() {
+		return nil
+	}
+	return p.pageAt(p.pageNum - 1)
+}
+func (p *paginatorStub) First() *paginatorStub { return p.pageAt(1) }
+func (p *paginatorStub) Last() *paginatorStub  { return p.pageAt(p.totalPages) }
+func (p *paginatorStub) Pagers() []*paginatorStub {
+	total := p.totalPages
+	if total <= 0 {
+		total = 1
+	}
+	out := make([]*paginatorStub, total)
+	for i := 0; i < total; i++ {
+		out[i] = p.pageAt(i + 1)
+	}
+	return out
+}
+func (p *paginatorStub) PageSize() int            { return len(p.pageItems) }
+func (p *paginatorStub) PageGroups() []pageGroup  { return nil }
 
 // pageGroup represents a group of pages (e.g., grouped by date).
 type pageGroup struct {
@@ -1424,6 +1487,7 @@ type Renderer struct {
 	assets        AssetRefs
 	layoutsDir    string
 	liveReload    bool
+	paginateBy    int
 	tmplCache     map[string]*template.Template
 	partialCache  map[string]*template.Template
 	tmplMu        sync.Mutex
@@ -1432,12 +1496,13 @@ type Renderer struct {
 }
 
 // New creates a new Renderer.
-func New(site *SiteData, assets AssetRefs, layoutsDir string, liveReload bool) *Renderer {
+func New(site *SiteData, assets AssetRefs, layoutsDir string, liveReload bool, paginateBy int) *Renderer {
 	r := &Renderer{
 		site:         site,
 		assets:       assets,
 		layoutsDir:   layoutsDir,
 		liveReload:   liveReload,
+		paginateBy:   paginateBy,
 		tmplCache:    make(map[string]*template.Template),
 		partialCache: make(map[string]*template.Template),
 	}
@@ -4345,18 +4410,92 @@ func (r *Renderer) RenderPage(page *content.Page, allPages []*content.Page) erro
 				}
 			}
 		case "home":
-			for _, p := range allPages {
-				if p.Kind == "page" && !p.Draft && !p.Date.IsZero() {
-					data.Pages = append(data.Pages, &HugoPage{Page: p, Site: r.site})
-				}
-			}
-			sort.Slice(data.Pages, func(i, j int) bool {
-				return data.Pages[i].Page.Date.After(data.Pages[j].Page.Date)
-			})
+			return r.renderHomePaginated(page, allPages)
 		}
 	}
 
 	return r.renderToFileFor(templateName, page.OutputPath, data, page.Type, page.Layout, page.Section, page.Lang)
+}
+
+// renderHomePaginated generates /, /page/2/, /page/3/, … for the home page.
+func (r *Renderer) renderHomePaginated(page *content.Page, allPages []*content.Page) error {
+	pageSize := r.paginateBy
+	if pageSize <= 0 {
+		pageSize = 10
+	}
+
+	// Collect and sort all dated leaf pages.
+	var all HugoPageList
+	for _, p := range allPages {
+		if p.Kind == "page" && !p.Draft && !p.Date.IsZero() {
+			all = append(all, &HugoPage{Page: p, Site: r.site})
+		}
+	}
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].Page.Date.After(all[j].Page.Date)
+	})
+
+	totalItems := len(all)
+	totalPages := (totalItems + pageSize - 1) / pageSize
+	if totalPages == 0 {
+		totalPages = 1
+	}
+
+	outputDir := filepath.Dir(page.OutputPath)
+	baseURL := ""
+	if r.site != nil {
+		baseURL = r.site.BaseURL
+	}
+
+	for pageNum := 1; pageNum <= totalPages; pageNum++ {
+		start := (pageNum - 1) * pageSize
+		end := start + pageSize
+		if end > totalItems {
+			end = totalItems
+		}
+		var pageItems HugoPageList
+		if start < totalItems {
+			pageItems = all[start:end]
+		}
+
+		pag := &paginatorStub{
+			pageItems:  pageItems,
+			pageNum:    pageNum,
+			totalPages: totalPages,
+			totalItems: totalItems,
+			baseURL:    baseURL,
+		}
+
+		data := &TemplateData{
+			Page:          page,
+			Site:          r.site,
+			Assets:        r.assets,
+			Pages:         pageItems,
+			paginatorData: pag,
+		}
+
+		sidebarRoot := determineSidebarRoot(page)
+		data.SidebarRoot = sidebarRoot
+		data.SidebarBack = determineSidebarBack(page)
+		if sidebarRoot != nil {
+			data.SidebarItems = buildSidebarItems(sidebarRoot, page.RelPermalink)
+		}
+
+		var outputPath string
+		if pageNum == 1 {
+			outputPath = page.OutputPath
+		} else {
+			outputPath = filepath.Join(outputDir, "page", strconv.Itoa(pageNum), "index.html")
+			if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+				return err
+			}
+		}
+
+		if err := r.renderToFileFor("home", outputPath, data, page.Type, page.Layout, page.Section, page.Lang); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Render404 renders a 404.html page to outputDir/404.html.
