@@ -857,6 +857,8 @@ type TemplateData struct {
 	SidebarBack      *content.Page   // back-link target (nil = no back link)
 	PrevPage         *content.Page   // previous sibling (for pager)
 	NextPage         *content.Page   // next sibling (for pager)
+	TermTotal        int             // total members of a term (before capping); 0 = not a capped term page
+	TermShown        int             // members actually listed on this term page
 	paginatorData    *paginatorStub  // set by renderHomePaginated for real pagination
 	scratch          *Scratch
 	store            *Scratch
@@ -4822,6 +4824,14 @@ func (r *Renderer) Render404(outputDir string, allPages []*content.Page) error {
 }
 
 // RenderTagPage renders a tag term page.
+// maxTermItems caps how many members a single tag/term page lists inline.
+// Large tags (e.g. every codeforces problem) otherwise produce a single
+// index.html that grows without bound and blows past Cloudflare Pages' 25 MiB
+// per-file limit. The individual pages remain reachable via their sections,
+// shard sites, and search; the term page is only a discovery index, so it
+// lists the newest maxTermItems and shows a notice with the true total.
+const maxTermItems = 1000
+
 func (r *Renderer) RenderTagPage(tag string, pages []*content.Page, outputDir string) error {
 	urlized := urlize(tag)
 	permalink := "/tags/" + urlized + "/"
@@ -4835,11 +4845,20 @@ func (r *Renderer) RenderTagPage(tag string, pages []*content.Page, outputDir st
 		Section:      "tags",
 	}
 
+	total := len(pages)
+	shown := pages
+	if total > maxTermItems {
+		// pages arrive sorted newest-first, so the head is the newest slice.
+		shown = pages[:maxTermItems]
+	}
+
 	data := &TemplateData{
-		Page:   fakePage,
-		Site:   r.site,
-		Assets: r.assets,
-		Pages:  wrapPages(pages, r.site),
+		Page:      fakePage,
+		Site:      r.site,
+		Assets:    r.assets,
+		Pages:     wrapPages(shown, r.site),
+		TermTotal: total,
+		TermShown: len(shown),
 	}
 
 	return r.renderToFile("term", outputPath, data)
