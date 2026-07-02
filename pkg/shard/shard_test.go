@@ -4,6 +4,70 @@ import (
 	"testing"
 )
 
+// makeRangedCfg builds a codeforces primary/secondary split partitioned at
+// contest id 104454: ids <=104454 stay on codeforces, ids >=104455 move to
+// codeforces-2. Both share the /practice/codeforces/ source prefix.
+func makeRangedCfg() (*Site, *Site, []*Site) {
+	main := &Site{Name: "main", Domain: "brain.tamnd.com"}
+	cf := &Site{Name: "codeforces", Domain: "codeforces.tamnd.com", SourcePrefix: "/practice/codeforces/", RangeMax: 104454}
+	cf2 := &Site{Name: "codeforces-2", Domain: "codeforces-2.tamnd.com", SourcePrefix: "/practice/codeforces/", RangeMin: 104455}
+	return main, cf, []*Site{cf, cf2}
+}
+
+func TestShardPathForRange(t *testing.T) {
+	_, cf, shards := makeRangedCfg()
+	cf2 := shards[1]
+
+	// Low contest belongs to primary only.
+	if got, ok := shardPathFor("/practice/codeforces/100/", cf); !ok || got != "/100/" {
+		t.Errorf("cf low: got %q ok=%v", got, ok)
+	}
+	if _, ok := shardPathFor("/practice/codeforces/100/", cf2); ok {
+		t.Errorf("cf2 must reject low contest 100")
+	}
+	// High contest belongs to secondary only.
+	if _, ok := shardPathFor("/practice/codeforces/106516/", cf); ok {
+		t.Errorf("cf must reject high contest 106516")
+	}
+	if got, ok := shardPathFor("/practice/codeforces/106516/", cf2); !ok || got != "/106516/" {
+		t.Errorf("cf2 high: got %q ok=%v", got, ok)
+	}
+	// Boundary ids.
+	if _, ok := shardPathFor("/practice/codeforces/104454/", cf); !ok {
+		t.Errorf("104454 must stay on primary")
+	}
+	if _, ok := shardPathFor("/practice/codeforces/104455/", cf); ok {
+		t.Errorf("104455 must leave primary")
+	}
+	// Non-numeric section index belongs to primary only.
+	if _, ok := shardPathFor("/practice/codeforces/", cf); !ok {
+		t.Errorf("section index must stay on primary")
+	}
+	if _, ok := shardPathFor("/practice/codeforces/", cf2); ok {
+		t.Errorf("cf2 must reject non-numeric section index")
+	}
+}
+
+func TestRewriteRelativeCrossShard(t *testing.T) {
+	main, cf, shards := makeRangedCfg()
+
+	// A listing page at /practice/codeforces/ with relative sibling links.
+	// Same-shard (<=104454) stays relative; cross-shard (>=104455) goes absolute.
+	baseDir := "/practice/codeforces/"
+	input := `<a href="104300/">a</a> <a href="104500/">b</a> <a href="#top">t</a> <a href="mailto:x@y.z">m</a>`
+	want := `<a href="104300/">a</a> <a href="https://codeforces-2.tamnd.com/104500/">b</a> <a href="#top">t</a> <a href="mailto:x@y.z">m</a>`
+	if got := rewriteText(input, baseDir, cf, main, shards); got != want {
+		t.Errorf("relative cross-shard:\n  got:  %s\n  want: %s", got, want)
+	}
+
+	// Without a ranged shard, the second pass is skipped entirely.
+	m2, kvant, plain := makeTestCfg()
+	same := `<a href="1/">x</a>`
+	if got := rewriteText(same, "/practice/kvant/", kvant, m2, plain); got != same {
+		t.Errorf("non-ranged config must not touch relative links: got %s", got)
+	}
+}
+
 func TestParseConfig(t *testing.T) {
 	data := []byte(`
 [main]
@@ -149,7 +213,7 @@ func TestRewriteText(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		got := rewriteText(tc.input, tc.current, main, shards)
+		got := rewriteText(tc.input, "", tc.current, main, shards)
 		if got != tc.want {
 			t.Errorf("%s:\n  input: %s\n  got:   %s\n  want:  %s", tc.name, tc.input, got, tc.want)
 		}

@@ -266,6 +266,7 @@ var defaultTemplates = map[string]string{
 <div class="list-page">
   <header class="page-header">
     <h1>Tag: {{.Page.Title}}</h1>
+    {{if gt .TermTotal .TermShown}}<p class="meta">Showing the newest {{.TermShown}} of {{.TermTotal}}. Use search to find the rest.</p>{{end}}
   </header>
   <ul class="page-list">
     {{range .Pages}}

@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -57,6 +58,32 @@ type Site struct {
 	Output       string // destination directory
 	FileBudget   int    // max files allowed (0 = unlimited)
 	SourcePrefix string // e.g. "/practice/kvant/" — empty for main
+	RangeMin     int    // lower bound (inclusive) on the numeric first path
+	RangeMax     int    // segment under SourcePrefix; 0/0 = whole subtree.
+	// Several shards may share one SourcePrefix and partition it by a numeric
+	// first segment (e.g. a codeforces contest id) using RangeMin/RangeMax.
+	// This lets one prefix span multiple Cloudflare projects when it outgrows
+	// the 20,000-files-per-deployment limit.
+}
+
+// hasRange reports whether the shard partitions its SourcePrefix by a numeric
+// first-segment range instead of owning the whole subtree.
+func (s *Site) hasRange() bool { return s.RangeMin > 0 || s.RangeMax > 0 }
+
+// isPrimaryRange reports whether this shard owns the non-numeric pages under a
+// partitioned prefix (the section index and shared assets). The primary is the
+// shard whose lower bound is zero.
+func (s *Site) isPrimaryRange() bool { return s.RangeMin == 0 }
+
+// idInRange reports whether a numeric first segment belongs to this shard.
+func (s *Site) idInRange(id int) bool {
+	if id < s.RangeMin {
+		return false
+	}
+	if s.RangeMax > 0 && id > s.RangeMax {
+		return false
+	}
+	return true
 }
 
 // BaseURL returns "https://<domain>".
@@ -144,7 +171,33 @@ func applyField(s *Site, key, val string) {
 		}
 	case "source_prefix":
 		s.SourcePrefix = slashWrap(val)
+	case "range_min":
+		if n, err := strconv.Atoi(val); err == nil {
+			s.RangeMin = n
+		}
+	case "range_max":
+		if n, err := strconv.Atoi(val); err == nil {
+			s.RangeMax = n
+		}
 	}
+}
+
+// firstSegmentID parses the first path segment of rel (which begins with "/")
+// as an integer, e.g. "/1234/A/" → 1234. ok is false when the segment is empty
+// or non-numeric.
+func firstSegmentID(rel string) (id int, ok bool) {
+	s := strings.TrimPrefix(rel, "/")
+	if i := strings.IndexByte(s, '/'); i >= 0 {
+		s = s[:i]
+	}
+	if s == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // ParseConfig parses a deploy-shards.toml byte slice.
@@ -203,6 +256,46 @@ var combinedRe = regexp.MustCompile(
 		`|url\((/[^)'"\s]+)\)`,
 )
 
+// relLinkRe matches href/src values that are relative paths (not absolute, not
+// an anchor). combinedRe only rewrites absolute "/…" URLs, so relative links
+// like href="1234/" pass through untouched. Those break when the target moves
+// to a sibling shard (e.g. a codeforces contest above the split cutoff), so we
+// resolve them against the page's own path and rewrite the cross-shard ones.
+var relLinkRe = regexp.MustCompile(`((?:href|src)=["'])([^"'/#][^"'<>{}\s]*)(["'])`)
+
+// hasURLScheme reports whether s begins with a scheme like "https:", "mailto:",
+// "tel:", or "data:" (a ':' before any '/', '.', '?' or '#').
+func hasURLScheme(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == ':' {
+			return true
+		}
+		if c == '/' || c == '.' || c == '?' || c == '#' {
+			return false
+		}
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '+' || c == '-') {
+			return false
+		}
+	}
+	return false
+}
+
+// resolveRelative joins a relative URL onto baseDir (which ends with "/"),
+// cleaning any "../" segments while preserving a trailing slash and any
+// query/anchor suffix.
+func resolveRelative(baseDir, rel string) string {
+	core, suffix := rel, ""
+	if i := strings.IndexAny(rel, "?#"); i >= 0 {
+		core, suffix = rel[:i], rel[i:]
+	}
+	joined := path.Join(baseDir, core)
+	if strings.HasSuffix(core, "/") && !strings.HasSuffix(joined, "/") {
+		joined += "/"
+	}
+	return joined + suffix
+}
+
 func isLocalShared(url string) bool {
 	for _, p := range localSharedPrefixes {
 		if strings.HasPrefix(url, p) {
@@ -212,14 +305,22 @@ func isLocalShared(url string) bool {
 	return false
 }
 
-func slashURL(p string) string {
-	if !strings.HasPrefix(p, "/") {
-		p = "/" + p
+// pageBaseDir returns the URL directory that relative links inside the file at
+// output-relative path rel (on site current) resolve against. For a shard the
+// output root maps to SourcePrefix; for main it maps to "/".
+func pageBaseDir(current *Site, rel string) string {
+	rel = filepath.ToSlash(rel)
+	var urlPath string
+	if current.SourcePrefix != "" {
+		urlPath = current.SourcePrefix + rel // SourcePrefix ends with "/"
+	} else {
+		urlPath = "/" + rel
 	}
-	if !strings.HasSuffix(p, "/") {
-		p += "/"
+	dir := path.Dir(urlPath)
+	if dir == "/" {
+		return "/"
 	}
-	return p
+	return dir + "/"
 }
 
 func splitSuffix(url string) (path, suffix string) {
@@ -248,19 +349,33 @@ func shardPathFor(urlPath string, shard *Site) (string, bool) {
 	if !strings.HasSuffix(compare, "/") {
 		compare += "/"
 	}
-	if compare == shard.SourcePrefix {
-		return "/", true
-	}
-	if strings.HasPrefix(compare, shard.SourcePrefix) {
+	var remaining string
+	switch {
+	case compare == shard.SourcePrefix:
+		remaining = "/"
+	case strings.HasPrefix(compare, shard.SourcePrefix):
 		// Strip prefix from the original urlPath (preserves file vs. directory).
 		// SourcePrefix ends with "/"; trim the last char so we keep the leading "/".
-		remaining := urlPath[len(shard.SourcePrefix)-1:]
+		remaining = urlPath[len(shard.SourcePrefix)-1:]
 		if !strings.HasPrefix(remaining, "/") {
 			remaining = "/" + remaining
 		}
-		return remaining, true
+	default:
+		return "", false
 	}
-	return "", false
+	// When several shards partition one prefix by contest id, gate on the range:
+	// numeric first segments must fall in [RangeMin, RangeMax]; non-numeric pages
+	// (section index, assets) belong only to the primary shard.
+	if shard.hasRange() {
+		if id, ok := firstSegmentID(remaining); ok {
+			if !shard.idInRange(id) {
+				return "", false
+			}
+		} else if !shard.isPrimaryRange() {
+			return "", false
+		}
+	}
+	return remaining, true
 }
 
 // mapURL rewrites a single absolute path URL for the context of current site.
@@ -292,10 +407,10 @@ func mapURL(url string, current, main *Site, shards []*Site) string {
 
 // rewriteText applies all URL rewrites to an HTML/CSS/JS/… file body in a
 // single regex scan (combinedRe) instead of five separate passes.
-func rewriteText(text string, current, main *Site, shards []*Site) string {
+func rewriteText(text string, baseDir string, current, main *Site, shards []*Site) string {
 	mapFn := func(u string) string { return mapURL(u, current, main, shards) }
 
-	return combinedRe.ReplaceAllStringFunc(text, func(m string) string {
+	text = combinedRe.ReplaceAllStringFunc(text, func(m string) string {
 		subs := combinedRe.FindStringSubmatch(m)
 		if len(subs) < 9 {
 			return m
@@ -353,6 +468,43 @@ func rewriteText(text string, current, main *Site, shards []*Site) string {
 		}
 		return m
 	})
+
+	// Second pass: rewrite relative href/src links that now cross a shard
+	// boundary. combinedRe only touches absolute "/…" URLs, so a relative link
+	// like href="104500/" in a listing page would still point at the current
+	// shard after a range split. Resolve each relative link against the page's
+	// own directory and, when the resolved target lives on a sibling shard,
+	// rewrite it to that shard's absolute URL. Same-shard relatives are left
+	// alone to keep the diff minimal. Only relevant when a ranged shard exists.
+	if baseDir != "" && anyRanged(shards) {
+		text = relLinkRe.ReplaceAllStringFunc(text, func(m string) string {
+			subs := relLinkRe.FindStringSubmatch(m)
+			if len(subs) < 4 {
+				return m
+			}
+			prefix, rel, quote := subs[1], subs[2], subs[3]
+			if hasURLScheme(rel) {
+				return m
+			}
+			mapped := mapFn(resolveRelative(baseDir, rel))
+			if strings.HasPrefix(mapped, "http") {
+				return prefix + mapped + quote
+			}
+			return m
+		})
+	}
+
+	return text
+}
+
+// anyRanged reports whether any shard partitions its prefix by contest-id range.
+func anyRanged(shards []*Site) bool {
+	for _, s := range shards {
+		if s.hasRange() {
+			return true
+		}
+	}
+	return false
 }
 
 // rewriteNeeded is a fast byte-level pre-check before running any regex.
@@ -377,7 +529,7 @@ func rewriteNeeded(data []byte, current, main *Site, shards []*Site) bool {
 	return false
 }
 
-func rewriteFile(path string, current, main *Site, shards []*Site) (bool, error) {
+func rewriteFile(path string, baseDir string, current, main *Site, shards []*Site) (bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return false, err
@@ -387,7 +539,7 @@ func rewriteFile(path string, current, main *Site, shards []*Site) (bool, error)
 		return false, nil
 	}
 	original := string(data)
-	rewritten := rewriteText(original, current, main, shards)
+	rewritten := rewriteText(original, baseDir, current, main, shards)
 	if rewritten == original {
 		return false, nil
 	}
@@ -433,7 +585,8 @@ func rewriteTree(root string, current, main *Site, shards []*Site) (int, error) 
 		go func(path string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			changed, err := rewriteFile(path, current, main, shards)
+			rel := strings.TrimPrefix(strings.TrimPrefix(path, root), string(filepath.Separator))
+			changed, err := rewriteFile(path, pageBaseDir(current, rel), current, main, shards)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -526,6 +679,40 @@ func copyDir(src, dst string) error {
 	}
 	wg.Wait()
 	return firstErr
+}
+
+// copyShardRanged copies only the immediate children of src whose numeric name
+// falls in the shard's range. Non-numeric children (the section index.html and
+// any shared files) go to the primary shard only. Used when several shards
+// partition one source_prefix by contest id.
+func copyShardRanged(src, dst string, shard *Site) error {
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dst, 0755); err != nil {
+		return err
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if id, perr := strconv.Atoi(name); perr == nil {
+			if !shard.idInRange(id) {
+				continue
+			}
+		} else if !shard.isPrimaryRange() {
+			continue
+		}
+		s := filepath.Join(src, name)
+		d := filepath.Join(dst, name)
+		if e.IsDir() {
+			if err := copyDir(s, d); err != nil {
+				return err
+			}
+		} else if err := copyFile(s, d); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // copyTreeExcluding copies src to dst, skipping top-level dirs in excluded, using parallel goroutines.
@@ -1141,7 +1328,8 @@ func copyOrRewriteTo(srcPath, dstPath string, site, main *Site, shards []*Site) 
 	if err != nil {
 		return err
 	}
-	rewritten := rewriteText(string(data), site, main, shards)
+	rel := strings.TrimPrefix(strings.TrimPrefix(dstPath, site.Output), string(filepath.Separator))
+	rewritten := rewriteText(string(data), pageBaseDir(site, rel), site, main, shards)
 	_ = os.Remove(dstPath)
 	return os.WriteFile(dstPath, []byte(rewritten), 0644)
 }
@@ -1187,6 +1375,14 @@ func splitIncremental(opts Options, cfg *Config, allSites []*Site, dates lastmod
 		}
 	}
 	t = logPhase("incremental-update", t)
+
+	// Strip any leaked DB files or oversized outputs, same as the full split.
+	// Cloudflare Pages rejects the whole deployment on a single file over
+	// 25 MiB, and the incremental path used to skip this, so a stale oversized
+	// page could survive across runs.
+	for _, s := range allSites {
+		cleanDir(s.Output)
+	}
 
 	if err := splitSearchData(opts.PublicDir, cfg.Main.Output, cfg.Shards); err != nil {
 		return nil, fmt.Errorf("split search: %w", err)
@@ -1331,7 +1527,11 @@ func Split(opts Options) ([]SiteSummary, error) {
 		go func() {
 			defer copyWG.Done()
 			src := filepath.Join(opts.PublicDir, strings.Trim(shard.SourcePrefix, "/"))
-			if err := copyDir(src, shard.Output); err != nil {
+			copyShard := copyDir
+			if shard.hasRange() {
+				copyShard = func(src, dst string) error { return copyShardRanged(src, dst, shard) }
+			}
+			if err := copyShard(src, shard.Output); err != nil {
 				copyMu.Lock()
 				if copyErr == nil {
 					copyErr = fmt.Errorf("copy shard %s: %w", shard.Name, err)
