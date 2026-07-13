@@ -320,11 +320,71 @@ func (hp *HugoPage) OutputFormats() *outputFormatsStub { return &outputFormatsSt
 // AlternativeOutputFormats returns a stub.
 func (hp *HugoPage) AlternativeOutputFormats() *outputFormatsStub { return &outputFormatsStub{} }
 
-// RegularPages returns an empty list (stub for sections).
-func (hp *HugoPage) RegularPages() HugoPageList { return nil }
+// Pages returns the direct children of this page, wrapped for template use.
+// Mirrors Hugo's .Pages: on a section it is the pages and subsections directly
+// under it, in tree order.
+func (hp *HugoPage) Pages() HugoPageList {
+	if hp.Page == nil {
+		return nil
+	}
+	return wrapPages(hp.Page.Children, hp.Site)
+}
 
-// Pages returns an empty list (stub for sections in range).
-func (hp *HugoPage) Pages() HugoPageList { return nil }
+// RegularPages returns the direct children of kind "page" (Hugo's .RegularPages).
+func (hp *HugoPage) RegularPages() HugoPageList {
+	if hp.Page == nil {
+		return nil
+	}
+	var out HugoPageList
+	for _, c := range hp.Page.Children {
+		if c != nil && c.Kind == "page" {
+			out = append(out, &HugoPage{Page: c, Site: hp.Site})
+		}
+	}
+	return out
+}
+
+// Sections returns the direct children of kind "section" (Hugo's .Sections).
+func (hp *HugoPage) Sections() HugoPageList {
+	if hp.Page == nil {
+		return nil
+	}
+	var out HugoPageList
+	for _, c := range hp.Page.Children {
+		if c != nil && c.Kind == "section" {
+			out = append(out, &HugoPage{Page: c, Site: hp.Site})
+		}
+	}
+	return out
+}
+
+// RegularPagesRecursive returns every descendant of kind "page", at any depth
+// (Hugo's .RegularPagesRecursive): the pages in this section and all of its
+// subsections.
+func (hp *HugoPage) RegularPagesRecursive() HugoPageList {
+	if hp.Page == nil {
+		return nil
+	}
+	return wrapPages(regularDescendants(hp.Page.Children), hp.Site)
+}
+
+// regularDescendants walks a child slice depth-first and collects every page of
+// kind "page", descending through sections.
+func regularDescendants(children []*content.Page) []*content.Page {
+	var out []*content.Page
+	for _, c := range children {
+		if c == nil {
+			continue
+		}
+		if c.Kind == "page" {
+			out = append(out, c)
+		}
+		if len(c.Children) > 0 {
+			out = append(out, regularDescendants(c.Children)...)
+		}
+	}
+	return out
+}
 
 
 // Render renders the page with an alternative layout (stub — returns empty).
@@ -431,7 +491,9 @@ func (s hugoSlice) Last(n int) hugoSlice {
 
 type HugoPageList []*HugoPage
 
-// GroupByDate groups pages by a date format string, returning [{Key, Pages}] sorted descending.
+// GroupByDate groups pages by a date format string, returning [{Key, Pages}] in the
+// order the keys are first seen. It does not sort: feed it a list already ordered the
+// way you want the groups to come out (for newest-first groups, pass .ByDate.Reverse).
 func (pl HugoPageList) GroupByDate(layout string) []HugoPageGroup {
 	groups := map[string]HugoPageList{}
 	order := []string{}
@@ -471,11 +533,11 @@ func (pl HugoPageList) sortedBy(key string) HugoPageList {
 		case "Weight":
 			return a.Page.Weight < b.Page.Weight
 		case "Lastmod":
-			return a.Lastmod().Time.After(b.Lastmod().Time)
+			return a.Lastmod().Time.Before(b.Lastmod().Time)
 		case "PublishDate":
-			return a.PublishDate().Time.After(b.PublishDate().Time)
+			return a.PublishDate().Time.Before(b.PublishDate().Time)
 		default:
-			return a.Date().Time.After(b.Date().Time)
+			return a.Date().Time.Before(b.Date().Time)
 		}
 	})
 	return out
@@ -1524,10 +1586,16 @@ func (d *TemplateData) Name() string {
 	return ""
 }
 func (d *TemplateData) RegularPagesRecursive() HugoPageList {
-	if d.Pages != nil {
-		return d.Pages
+	// Hugo returns every descendant page of the current section, at any depth.
+	// Walk the content tree from the current page so intermediate sections
+	// (year/month index pages that hold only subsections) still surface the
+	// leaf pages beneath them.
+	if d.Page != nil {
+		if desc := regularDescendants(d.Page.Children); len(desc) > 0 {
+			return wrapPages(desc, d.Site)
+		}
 	}
-	return nil
+	return d.Pages
 }
 
 // Keywords returns the page's tags/keywords for use in meta tags.
