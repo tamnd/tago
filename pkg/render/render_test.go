@@ -23,12 +23,12 @@ func makeSite() *SiteData {
 
 func makeRenderer(t *testing.T) *Renderer {
 	t.Helper()
-	return New(makeSite(), AssetRefs{}, "", false)
+	return New(makeSite(), AssetRefs{}, "", false, 0, "")
 }
 
 func makeRendererWithLayouts(t *testing.T, layoutsDir string) *Renderer {
 	t.Helper()
-	return New(makeSite(), AssetRefs{}, layoutsDir, false)
+	return New(makeSite(), AssetRefs{}, layoutsDir, false, 0, "")
 }
 
 // --- Template function tests ---
@@ -1866,5 +1866,59 @@ func TestIntegrationIndexFunction(t *testing.T) {
 	got2 := renderPartialStr(t, tmpl2, ctx)
 	if got2 != "y" {
 		t.Errorf("index slice = %q, want y", got2)
+	}
+}
+
+// TestHugoPageListByDateAscending pins the Hugo contract: .ByDate sorts oldest
+// first, so .ByDate.Reverse is newest first. tago previously sorted .ByDate
+// descending, which made .Reverse produce oldest-first and broke dated archives.
+func TestHugoPageListByDateAscending(t *testing.T) {
+	site := makeSite()
+	mk := func(title string, d time.Time) *HugoPage {
+		return &HugoPage{Page: &content.Page{Kind: "page", Title: title, Date: d}, Site: site}
+	}
+	old := time.Date(2026, 7, 12, 23, 49, 0, 0, time.UTC)
+	mid := time.Date(2026, 7, 13, 8, 4, 0, 0, time.UTC)
+	newest := time.Date(2026, 7, 13, 14, 55, 0, 0, time.UTC)
+
+	// Feed in a deliberately unsorted list.
+	list := HugoPageList{mk("mid", mid), mk("newest", newest), mk("old", old)}
+
+	asc := list.ByDate()
+	if asc[0].Page.Title != "old" || asc[2].Page.Title != "newest" {
+		t.Fatalf("ByDate should be oldest first, got %s..%s", asc[0].Page.Title, asc[2].Page.Title)
+	}
+
+	desc := list.ByDate().Reverse()
+	if desc[0].Page.Title != "newest" || desc[2].Page.Title != "old" {
+		t.Fatalf("ByDate.Reverse should be newest first, got %s..%s", desc[0].Page.Title, desc[2].Page.Title)
+	}
+
+	// GroupByDate keeps the input order, so newest-first in yields newest-first groups.
+	groups := desc.GroupByDate("2006-01-02")
+	if len(groups) != 2 || groups[0].Key != "2026-07-13" || groups[1].Key != "2026-07-12" {
+		t.Fatalf("GroupByDate should keep input order (newest day first), got %#v", groups)
+	}
+}
+
+// TestHugoPageRegularPagesRecursive checks that a section reaches leaf pages at
+// any depth, which is what lets a nested date archive list every report from the
+// year or month landing page with no hand-maintained index.
+func TestHugoPageRegularPagesRecursive(t *testing.T) {
+	site := makeSite()
+	leaf1 := &content.Page{Kind: "page", Title: "leaf1"}
+	leaf2 := &content.Page{Kind: "page", Title: "leaf2"}
+	day := &content.Page{Kind: "section", Title: "day", Children: []*content.Page{leaf1, leaf2}}
+	month := &content.Page{Kind: "section", Title: "month", Children: []*content.Page{day}}
+
+	hp := &HugoPage{Page: month, Site: site}
+	if got := len(hp.RegularPagesRecursive()); got != 2 {
+		t.Fatalf("RegularPagesRecursive from month = %d leaves, want 2", got)
+	}
+	if got := len(hp.Sections()); got != 1 {
+		t.Fatalf("Sections from month = %d, want 1", got)
+	}
+	if got := len(hp.RegularPages()); got != 0 {
+		t.Fatalf("RegularPages from month = %d (month has no direct leaf pages), want 0", got)
 	}
 }
