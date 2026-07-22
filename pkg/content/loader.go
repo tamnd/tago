@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
+	"unicode"
 )
 
 // LoadOptions configures the content loader.
@@ -53,20 +55,43 @@ func LoadAll(opts LoadOptions) ([]*Page, error) {
 		return nil, err
 	}
 
-	BuildTree(pages)
+	synth := BuildTree(pages)
+	for _, s := range synth {
+		s.Lang = opts.DefaultLang
+		s.OutputPath = OutputPathFromPermalink(opts.OutputDir, s.RelPermalink)
+	}
+	pages = append(pages, synth...)
 	return pages, nil
 }
 
 // BuildTree sets Parent, Children, and Ancestors for all pages.
 // It builds the hierarchy based on permalinks.
-func BuildTree(pages []*Page) {
+//
+// It also synthesizes in-memory section pages for any directory that holds
+// content but has no _index.md, mirroring Hugo, which creates a section for
+// every such directory. Without this, a page nested under a dir with no
+// _index.md would have no parent and drop out of .RegularPagesRecursive even
+// though it still renders as a standalone page. The synthesized sections are
+// returned so the caller can finish them (output path, permalink) and add them
+// to the render set; they carry an empty FilePath, which the build pipeline
+// treats as always-render, never-cache.
+func BuildTree(pages []*Page) []*Page {
 	// Build a map from permalink → page
 	byPermalink := make(map[string]*Page, len(pages))
 	for _, p := range pages {
 		byPermalink[p.RelPermalink] = p
 	}
 
-	for _, p := range pages {
+	// Fill in section pages for directories that have content but no _index.md,
+	// so every page is reachable from its root section.
+	synth := synthesizeMissingSections(pages, byPermalink)
+
+	// From here on, wire the tree over the real pages plus the synthesized ones.
+	all := make([]*Page, 0, len(pages)+len(synth))
+	all = append(all, pages...)
+	all = append(all, synth...)
+
+	for _, p := range all {
 		parentPermalink := parentOf(p.RelPermalink)
 		if parentPermalink != "" {
 			if parent, ok := byPermalink[parentPermalink]; ok {
@@ -76,14 +101,14 @@ func BuildTree(pages []*Page) {
 	}
 
 	// Set Children
-	for _, p := range pages {
+	for _, p := range all {
 		if p.Parent != nil {
 			p.Parent.Children = append(p.Parent.Children, p)
 		}
 	}
 
 	// Sort children by weight then date then title
-	for _, p := range pages {
+	for _, p := range all {
 		if len(p.Children) > 0 {
 			sort.Slice(p.Children, func(i, j int) bool {
 				ci, cj := p.Children[i], p.Children[j]
@@ -98,14 +123,22 @@ func BuildTree(pages []*Page) {
 		}
 	}
 
+	// A synthesized section carries no date of its own, so give it the newest
+	// date among its descendants, the way Hugo dates an auto-created section.
+	// Process deepest-first so a parent section sees its child sections' dates.
+	sort.SliceStable(synth, func(i, j int) bool { return synth[i].Depth > synth[j].Depth })
+	for _, s := range synth {
+		s.Date = maxDescendantDate(s)
+	}
+
 	// Set Ancestors
-	for _, p := range pages {
+	for _, p := range all {
 		p.Ancestors = buildAncestors(p)
 	}
 
 	// Apply cascade: collect cascade maps from all ancestors (nearest wins),
 	// then apply missing fields to each descendant page.
-	for _, p := range pages {
+	for _, p := range all {
 		// Build merged cascade from root → immediate parent (root first, parent last = nearest wins)
 		var cascades []map[string]any
 		for _, anc := range p.Ancestors {
@@ -125,6 +158,89 @@ func BuildTree(pages []*Page) {
 		}
 		applyCascade(p, merged)
 	}
+
+	return synth
+}
+
+// synthesizeMissingSections walks up from every page and creates a stub section
+// page for each ancestor directory that has no page of its own. Newly created
+// stubs are added to byPermalink so a shared ancestor is synthesized once, and
+// returned in creation order. It stops at the site root ("/"): a missing home
+// page is left alone.
+func synthesizeMissingSections(pages []*Page, byPermalink map[string]*Page) []*Page {
+	var synth []*Page
+	for _, p := range pages {
+		cur := parentOf(p.RelPermalink)
+		for cur != "" && cur != "/" {
+			if _, ok := byPermalink[cur]; ok {
+				break
+			}
+			s := newSyntheticSection(cur)
+			byPermalink[cur] = s
+			synth = append(synth, s)
+			cur = parentOf(cur)
+		}
+	}
+	return synth
+}
+
+// newSyntheticSection builds an in-memory section page for a permalink that has
+// no backing _index.md. FilePath is deliberately left empty: the build pipeline
+// renders empty-FilePath pages every time and never writes them to the cache.
+func newSyntheticSection(permalink string) *Page {
+	segs := splitPermalink(permalink)
+	name := ""
+	section := ""
+	if len(segs) > 0 {
+		name = segs[len(segs)-1]
+		section = segs[0]
+	}
+	title := humanizeSegment(name)
+	return &Page{
+		RelPermalink: permalink,
+		Kind:         "section",
+		Section:      section,
+		Depth:        len(segs),
+		Title:        title,
+		LinkTitle:    title,
+		Params:       map[string]any{},
+	}
+}
+
+// splitPermalink returns the non-empty path segments of a permalink.
+// "/experiments/2026/07/" → ["experiments", "2026", "07"].
+func splitPermalink(permalink string) []string {
+	trimmed := strings.Trim(permalink, "/")
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Split(trimmed, "/")
+}
+
+// humanizeSegment turns a path segment into a display title: dashes and
+// underscores become spaces and the first letter is upper-cased, matching
+// Hugo's default section titling. Numeric segments (date folders) pass through.
+func humanizeSegment(s string) string {
+	s = strings.ReplaceAll(s, "-", " ")
+	s = strings.ReplaceAll(s, "_", " ")
+	if s == "" {
+		return s
+	}
+	r := []rune(s)
+	r[0] = unicode.ToUpper(r[0])
+	return string(r)
+}
+
+// maxDescendantDate returns the newest Date among a page's descendants, used to
+// date a synthesized section from its content the way Hugo dates auto sections.
+func maxDescendantDate(p *Page) time.Time {
+	newest := p.Date
+	for _, c := range p.Children {
+		if d := maxDescendantDate(c); d.After(newest) {
+			newest = d
+		}
+	}
+	return newest
 }
 
 // applyCascade applies cascaded front matter values to a page, only for fields

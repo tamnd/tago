@@ -270,3 +270,80 @@ func TestLeafBundleInTree(t *testing.T) {
 		t.Errorf("leaf bundle permalink = %q, want /posts/my-post/", myPost.RelPermalink)
 	}
 }
+
+// TestBuildTreeSynthesizesMissingSections is the regression test for a dated
+// archive where the intermediate year/month/day folders have no _index.md.
+// Hugo creates a section for every such directory; tago must too, or the leaf
+// has no parent and drops out of the recursive listing while still rendering as
+// a standalone page (so it 404s from the index but 200s at its own URL).
+func TestBuildTreeSynthesizesMissingSections(t *testing.T) {
+	contentDir := setupContentDir(t)
+	writeFile(t, filepath.Join(contentDir, "_index.md"), "---\ntitle: Home\n---\n")
+	// The section landing page opts its whole subtree into date listing, exactly
+	// like the experiments archive. Only this _index.md exists; the year, month,
+	// and day folders below carry none.
+	writeFile(t, filepath.Join(contentDir, "exp", "_index.md"),
+		"---\ntitle: Experiments\ncascade:\n  list_by: date\n---\n")
+	writeFile(t, filepath.Join(contentDir, "exp", "2026", "07", "22", "13-00-report.md"),
+		"---\ntitle: A Report\ndate: 2026-07-22T13:00:00+07:00\n---\nBody.\n")
+
+	opts := LoadOptions{ContentDir: contentDir, DefaultLang: "en", OutputDir: t.TempDir()}
+	pages, err := LoadAll(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	byPermalink := map[string]*Page{}
+	for _, p := range pages {
+		byPermalink[p.RelPermalink] = p
+	}
+
+	// Each intermediate directory must now have a section page.
+	for _, want := range []string{"/exp/2026/", "/exp/2026/07/", "/exp/2026/07/22/"} {
+		s, ok := byPermalink[want]
+		if !ok {
+			t.Fatalf("no section synthesized for %s", want)
+		}
+		if s.Kind != "section" {
+			t.Errorf("%s kind = %q, want section", want, s.Kind)
+		}
+		if s.FilePath != "" {
+			t.Errorf("%s FilePath = %q, want empty (synthetic, never cached)", want, s.FilePath)
+		}
+		if s.OutputPath == "" {
+			t.Errorf("%s has no OutputPath, would not render", want)
+		}
+		if v, _ := s.Params["list_by"].(string); v != "date" {
+			t.Errorf("%s list_by = %q, want date (cascade must reach synthetic sections)", want, v)
+		}
+	}
+
+	// The day section takes its date from the report it contains.
+	day := byPermalink["/exp/2026/07/22/"]
+	if !day.Date.Equal(byPermalink["/exp/2026/07/22/13-00-report/"].Date) {
+		t.Errorf("day section date = %v, want the report's date", day.Date)
+	}
+	if day.Title != "22" {
+		t.Errorf("day section title = %q, want 22", day.Title)
+	}
+
+	// The report must be reachable from the section landing page at any depth.
+	exp := byPermalink["/exp/"]
+	if exp == nil {
+		t.Fatal("exp section missing")
+	}
+	var leaves []*Page
+	var walk func(children []*Page)
+	walk = func(children []*Page) {
+		for _, c := range children {
+			if c.Kind == "page" {
+				leaves = append(leaves, c)
+			}
+			walk(c.Children)
+		}
+	}
+	walk(exp.Children)
+	if len(leaves) != 1 || leaves[0].Title != "A Report" {
+		t.Fatalf("descendants of exp = %d leaves, want 1 (A Report)", len(leaves))
+	}
+}

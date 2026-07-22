@@ -35,14 +35,14 @@ type Config struct {
 	EditURLBase     string
 	Clean           bool
 	LiveReload      bool
-	SyntaxHighlight bool // enable Chroma server-side highlighting (slower builds)
+	SyntaxHighlight bool   // enable Chroma server-side highlighting (slower builds)
 	PaginateBy      int    // number of posts per home page (default 10)
 	PaginateMode    string // "year" for date-based pagination; default is size-based
 
 	// Build filtering (Hugo-compatible)
-	BuildDrafts   bool // --buildDrafts / buildDrafts in config
-	BuildFuture   bool // --buildFuture / buildFuture in config
-	BuildExpired  bool // --buildExpired / buildExpired in config
+	BuildDrafts  bool // --buildDrafts / buildDrafts in config
+	BuildFuture  bool // --buildFuture / buildFuture in config
+	BuildExpired bool // --buildExpired / buildExpired in config
 
 	// Site-level data exposed to templates
 	Params     map[string]any    // [params] in tago.toml → .Site.Params
@@ -240,8 +240,17 @@ func Build(cfg *Config) (*Stats, error) {
 		pageSlice = append(pageSlice, p)
 	}
 
-	// Step 6: Build full page tree
-	content.BuildTree(pageSlice)
+	// Step 6: Build full page tree. BuildTree also synthesizes section pages for
+	// directories that have content but no _index.md; finish them off with an
+	// output path and permalink and add them to the render set. Their empty
+	// FilePath makes the render loop below always rebuild them and skip caching.
+	synthSections := content.BuildTree(pageSlice)
+	for _, s := range synthSections {
+		s.Lang = cfg.DefaultLang
+		s.Permalink = strings.TrimRight(cfg.BaseURL, "/") + s.RelPermalink
+		s.OutputPath = content.OutputPathFromPermalink(cfg.OutputDir, s.RelPermalink)
+	}
+	pageSlice = append(pageSlice, synthSections...)
 
 	// Compute which ancestors need re-rendering
 	needsRender := make(map[string]bool)
@@ -337,14 +346,14 @@ func Build(cfg *Config) (*Stats, error) {
 		lang = "en"
 	}
 	site := &render.SiteData{
-		Title:        cfg.SiteTitle,
-		BaseURL:      cfg.BaseURL,
-		Description:  cfg.SiteDesc,
-		EditURLBase:  cfg.EditURLBase,
-		Params:       cfg.Params,
+		Title:           cfg.SiteTitle,
+		BaseURL:         cfg.BaseURL,
+		Description:     cfg.SiteDesc,
+		EditURLBase:     cfg.EditURLBase,
+		Params:          cfg.Params,
 		AllPages:        pageSlice,
 		AllRegularPages: regularPages,
-		LanguageCode: lang,
+		LanguageCode:    lang,
 		Language: &render.SiteLanguage{
 			Lang:              lang,
 			LanguageCode:      lang,
